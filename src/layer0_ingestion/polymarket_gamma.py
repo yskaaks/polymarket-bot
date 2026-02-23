@@ -203,6 +203,36 @@ class MarketFetcher:
         if data and len(data) > 0:
             return self._parse_market(data[0])
         return None
+        
+    def get_markets_by_condition_id(self, condition_id: str) -> list[Market]:
+        """
+        Get markets by condition ID (useful for UMA matching).
+        
+        Args:
+            condition_id: The Polymarket condition ID
+            
+        Returns:
+            List of matching Market objects
+        """
+        params = {"condition_id": condition_id}
+        data = self._get("/markets", params)
+        
+        markets = []
+        if isinstance(data, list):
+            for item in data:
+                try:
+                    markets.append(self._parse_market(item))
+                except Exception as e:
+                    print(f"Error parsing market: {e}")
+                    continue
+        elif isinstance(data, dict):
+             # Sometimes the API might return a single object or paginated response
+             try:
+                 markets.append(self._parse_market(data))
+             except Exception as e:
+                 print(f"Error parsing market: {e}")
+                 
+        return markets
     
     def get_daily_markets(self, limit: int = 50) -> list[Market]:
         """

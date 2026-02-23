@@ -13,8 +13,8 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from config.settings import get_config, reload_config
-from src.client import PolymarketClient, get_readonly_client
-from src.markets import MarketFetcher
+from src.layer0_ingestion.polymarket_clob import PolymarketClient, get_readonly_client
+from src.layer0_ingestion.polymarket_gamma import MarketFetcher
 
 
 def test_clob_api():

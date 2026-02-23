@@ -13,7 +13,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.markets import MarketFetcher, Market
+from src.layer0_ingestion.polymarket_gamma import MarketFetcher, Market
 from src.utils import format_usd, format_percent
 
 

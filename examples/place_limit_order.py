@@ -13,8 +13,8 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from config.settings import get_config
-from src.client import PolymarketClient
-from src.markets import MarketFetcher
+from src.layer0_ingestion.polymarket_clob import PolymarketClient
+from src.layer0_ingestion.polymarket_gamma import MarketFetcher
 from src.trading import TradingClient
 from src.orderbook import OrderbookAnalyzer
 
