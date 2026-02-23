@@ -45,3 +45,5 @@ logs/
 .pytest_cache/
 .coverage
 htmlcov/
+
+CLAUDE.md

@@ -16,26 +16,27 @@ cp .env.example .env
 # Edit .env with your private key and wallet address
 ```
 
-### 3. Test connection
+### 3. Check allowances (EOA wallets only)
 ```bash
-python scripts/test_connection.py
+python scripts/check_allowances.py
 ```
 
 ## Project Structure
 
 ```
-├── config/settings.py      # Configuration management
+├── config/settings.py                      # Configuration management
 ├── src/
-│   ├── client.py           # Main Polymarket client wrapper
-│   ├── markets.py          # Market discovery (Gamma API)
-│   ├── trading.py          # Order placement (CLOB API)
-│   ├── orderbook.py        # Orderbook analysis
-│   └── websocket_feed.py   # Real-time data streams
-├── scripts/
-│   ├── test_connection.py  # Verify API connectivity
-│   └── view_markets.py     # Browse active markets
-└── examples/
-    └── market_making_demo.py
+│   ├── layer0_ingestion/
+│   │   ├── polymarket_clob.py              # Main Polymarket client wrapper
+│   │   └── polymarket_gamma.py             # Market discovery (Gamma API)
+│   ├── layer4_execution/
+│   │   └── trading.py                      # Order placement (CLOB API)
+│   ├── orderbook.py                        # Orderbook analysis
+│   ├── websocket_feed.py                   # Real-time data streams
+│   ├── uma_client.py                       # UMA oracle settlement listener
+│   └── utils.py                            # Logging, math, and formatting helpers
+└── scripts/
+    └── check_allowances.py                 # Verify token allowances
 ```
 
 ## API Overview
