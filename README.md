@@ -1,66 +1,147 @@
 # Polymarket Arbitrage Bot
 
-A modular Python framework for interacting with Polymarket's APIs, designed for building market making and arbitrage strategies.
+A modular Python framework for Polymarket trading, built around a 6-layer architecture. Currently implements a UMA Oracle arbitrage strategy that monitors on-chain settlement events for trading opportunities.
 
 ## Quick Start
 
-### 1. Install dependencies
 ```bash
-cd polymarket-bot
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env  # edit with PRIVATE_KEY and FUNDER_ADDRESS
 ```
 
-### 2. Configure credentials
-```bash
-cp .env.example .env
-# Edit .env with your private key and wallet address
+Set `DRY_RUN=1` (default) to simulate orders without placing them on-chain.
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ Layer 0: Ingestion                                               │
+│  polymarket_gamma.py   – Market discovery (Gamma REST API)       │
+│  polymarket_clob.py    – CLOB client + auth (L0/L1/L2)          │
+│  uma_client.py         – UMA Oracle Settle event listener        │
+│  orderbook.py          – Spread, imbalance, slippage analysis    │
+│  websocket_feed.py     – Real-time price/trade/book streams      │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────────┐
+│ Layer 1: Research                     (not yet implemented)      │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────────┐
+│ Layer 2: Signals                                                 │
+│  uma_arb_signal.py     – Generate signals from UMA settlements   │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────────┐
+│ Layer 3: Portfolio & Risk                                        │
+│  risk_manager.py       – Signal validation (confidence gate)     │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────────┐
+│ Layer 4: Execution                                               │
+│  trading.py            – Limit/market orders, dry-run support    │
+│  execution_agent.py    – Trade execution wrapper                 │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────────┐
+│ Layer 5: Monitoring                   (not yet implemented)      │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-### 3. Check allowances (EOA wallets only)
-```bash
-python scripts/check_allowances.py
-```
+Orchestrated by `src/strategies/uma_arb_strategy.py` which wires all layers together in a polling loop.
 
 ## Project Structure
 
 ```
-├── config/settings.py                      # Configuration management
+├── config/
+│   └── settings.py                        # Config dataclass, loads from .env
 ├── src/
 │   ├── layer0_ingestion/
-│   │   ├── polymarket_clob.py              # Main Polymarket client wrapper
-│   │   └── polymarket_gamma.py             # Market discovery (Gamma API)
+│   │   ├── polymarket_clob.py             # CLOB client wrapper + auth lifecycle
+│   │   └── polymarket_gamma.py            # Market metadata (Gamma REST API)
+│   ├── layer1_research/                   # (empty — not yet implemented)
+│   ├── layer2_signals/
+│   │   └── uma_arb_signal.py              # UMA settlement → trade signal
+│   ├── layer3_portfolio/
+│   │   └── risk_manager.py                # Signal validation
 │   ├── layer4_execution/
-│   │   └── trading.py                      # Order placement (CLOB API)
-│   ├── orderbook.py                        # Orderbook analysis
-│   ├── websocket_feed.py                   # Real-time data streams
-│   ├── uma_client.py                       # UMA oracle settlement listener
-│   └── utils.py                            # Logging, math, and formatting helpers
-└── scripts/
-    └── check_allowances.py                 # Verify token allowances
+│   │   ├── trading.py                     # Order placement (limit/market/cancel)
+│   │   └── execution_agent.py             # Trade execution wrapper
+│   ├── layer5_monitoring/                 # (empty — not yet implemented)
+│   ├── strategies/
+│   │   └── uma_arb_strategy.py            # Main strategy orchestrator
+│   ├── orderbook.py                       # Orderbook analysis + arb detection
+│   ├── websocket_feed.py                  # Async WebSocket feed
+│   ├── uma_client.py                      # UMA Optimistic Oracle V3 client
+│   └── utils.py                           # Logging, math, formatting helpers
+├── scripts/
+│   ├── run_uma_arb_bot.py                 # Entry point: start the UMA arb bot
+│   ├── debug_uma_signal.py                # Debug signal generation pipeline
+│   ├── test_uma.py                        # Quick UMA connectivity test
+│   ├── test_connection.py                 # API connectivity tests
+│   ├── check_allowances.py               # EOA wallet allowance guide
+│   ├── explore_market.py                  # Interactive market explorer
+│   └── view_markets.py                    # Market listing utility
+└── examples/
+    ├── place_limit_order.py               # Single limit order demo
+    └── market_making_demo.py              # Two-sided market making demo
 ```
 
-## API Overview
+## UMA Arbitrage Strategy
 
-### Read-Only (No Auth Required)
-- Get market prices
-- View orderbooks
-- Fetch market metadata
+The core strategy monitors UMA Optimistic Oracle V3 on Polygon for `Settle` events, which signal that a market's outcome has been resolved on-chain. The flow:
 
-### Trading (Auth Required)
-- Place limit/market orders
-- Cancel orders
-- View positions
+1. **Poll UMA** — `UMAClient` fetches `Settle` events from recent blocks
+2. **Parse settlement** — Extract `resolvedPrice` and `ancillaryData` (contains condition ID)
+3. **Match to Polymarket** — Find the corresponding market via Gamma API
+4. **Check edge** — Compare resolved price against current orderbook *(stubbed)*
+5. **Risk check** — Validate signal confidence against threshold
+6. **Execute** — Place order via CLOB API *(stubbed in dry-run)*
 
-## Token Allowances (EOA Wallets)
+### Current Status
 
-If using MetaMask or hardware wallet, you must set allowances before trading:
-- USDC: `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`
-- Conditional Tokens: `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045`
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Market discovery (Gamma API) | Working | Pagination, retry, filtering |
+| CLOB auth (L0/L1/L2) | Working | EOA, Magic, Proxy wallet support |
+| UMA event fetching | Working | Settle events from OOV3 |
+| Orderbook analysis | Working | Spread, slippage, YES/NO arb |
+| Signal generation | Partial | `_check_profitability()` always returns True |
+| Risk manager | Minimal | Confidence threshold only |
+| Trade execution | Working | Limit/market orders, dry-run mode |
+| Execution agent | Stub | Logs but doesn't call TradingClient |
+| WebSocket feed | Partial | No reconnection logic |
+| Layer 1 (Research) | Not started | |
+| Layer 5 (Monitoring) | Not started | |
 
-See `scripts/check_allowances.py` for verification.
+## Running
+
+```bash
+# Start the UMA arb bot (dry-run by default)
+python scripts/run_uma_arb_bot.py
+
+# Debug signal generation
+python scripts/debug_uma_signal.py
+
+# Test UMA connectivity
+python scripts/test_uma.py
+
+# Explore a market interactively
+python scripts/explore_market.py
+
+# Check EOA wallet allowances
+python scripts/check_allowances.py
+```
+
+## Key Concepts
+
+- **Token IDs**: Each outcome (YES/NO) has a distinct CLOB token ID, separate from the market's `condition_id`
+- **Price range**: Limit orders must use prices between 0.01 and 0.99
+- **Chain**: Polygon mainnet (chain ID 137), USDC settlement
+- **Neg-risk markets**: Outcome prices must sum to 1.0, uses separate exchange contract
 
 ## Safety
 
-⚠️ **Never commit your `.env` file with real credentials!**
-
-Set `DRY_RUN=1` in `.env` to test without placing real orders.
+Set `DRY_RUN=1` in `.env` (default) to test without placing real orders. Never commit `.env` with real credentials.
