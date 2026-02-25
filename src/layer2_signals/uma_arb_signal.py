@@ -3,7 +3,7 @@ import re
 from typing import Optional, Dict, Any
 
 from src.layer0_ingestion.polymarket_gamma import MarketFetcher
-from src.layer0_ingestion.uma_oracle import UMAClient
+from src.layer0_ingestion.uma_client import UMAClient
 
 logger = logging.getLogger(__name__)
 

@@ -106,7 +106,7 @@ def test_authenticated(config):
             print(f"  ✓ Successfully authenticated!")
             
             # Try to get orders
-            from src.trading import TradingClient
+            from src.layer4_execution.trading import TradingClient
             trader = TradingClient(client.clob)
             orders = trader.get_open_orders()
             print(f"  ✓ Open orders: {len(orders)}")

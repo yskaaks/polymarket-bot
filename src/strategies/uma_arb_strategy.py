@@ -1,10 +1,11 @@
 import logging
+import sys
 import time
 
-from config.settings import Config
+from config.settings import Config, get_config
 from src.layer0_ingestion.polymarket_clob import PolymarketClient
 from src.layer0_ingestion.polymarket_gamma import MarketFetcher
-from src.layer0_ingestion.uma_oracle import UMAClient
+from src.layer0_ingestion.uma_client import UMAClient
 
 from src.layer2_signals.uma_arb_signal import UmaArbSignalGenerator
 from src.layer3_portfolio.risk_manager import PortfolioRiskManager
@@ -89,3 +90,28 @@ class UmaArbStrategy:
             logger.info("Stopping UMA Arb Strategy Orchestrator.")
         except Exception as e:
             logger.error(f"Strategy Loop Error: {e}")
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    config = get_config()
+
+    pm_client = PolymarketClient(config)
+    if not pm_client.connect():
+        logger.error("Failed to connect to Polymarket CLOB. Check credentials/network.")
+        sys.exit(1)
+
+    logger.info(f"Connected to Polymarket. Authenticated: {pm_client.is_authenticated}")
+
+    uma_client = UMAClient(rpc_url=config.polygon_rpc_url)
+    if uma_client.w3.is_connected():
+        logger.info(f"Connected to UMA Oracle. Block: {uma_client.w3.eth.block_number}")
+    else:
+        logger.warning("UMA Oracle Web3 connection failed, continuing anyway...")
+
+    strategy = UmaArbStrategy(config=config, pm_client=pm_client, uma_client=uma_client)
+    strategy.run_loop(poll_interval=15)

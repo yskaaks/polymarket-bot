@@ -60,7 +60,8 @@ Orchestrated by `src/strategies/uma_arb_strategy.py` which wires all layers toge
 ├── src/
 │   ├── layer0_ingestion/
 │   │   ├── polymarket_clob.py             # CLOB client wrapper + auth lifecycle
-│   │   └── polymarket_gamma.py            # Market metadata (Gamma REST API)
+│   │   ├── polymarket_gamma.py            # Market metadata (Gamma REST API)
+│   │   └── uma_client.py                  # UMA Optimistic Oracle V3 client
 │   ├── layer1_research/                   # (empty — not yet implemented)
 │   ├── layer2_signals/
 │   │   └── uma_arb_signal.py              # UMA settlement → trade signal
@@ -74,12 +75,9 @@ Orchestrated by `src/strategies/uma_arb_strategy.py` which wires all layers toge
 │   │   └── uma_arb_strategy.py            # Main strategy orchestrator
 │   ├── orderbook.py                       # Orderbook analysis + arb detection
 │   ├── websocket_feed.py                  # Async WebSocket feed
-│   ├── uma_client.py                      # UMA Optimistic Oracle V3 client
 │   └── utils.py                           # Logging, math, formatting helpers
 ├── scripts/
-│   ├── run_uma_arb_bot.py                 # Entry point: start the UMA arb bot
 │   ├── debug_uma_signal.py                # Debug signal generation pipeline
-│   ├── test_uma.py                        # Quick UMA connectivity test
 │   ├── test_connection.py                 # API connectivity tests
 │   ├── check_allowances.py               # EOA wallet allowance guide
 │   ├── explore_market.py                  # Interactive market explorer
@@ -120,13 +118,10 @@ The core strategy monitors UMA Optimistic Oracle V3 on Polygon for `Settle` even
 
 ```bash
 # Start the UMA arb bot (dry-run by default)
-python scripts/run_uma_arb_bot.py
+python -m src.strategies.uma_arb_strategy
 
 # Debug signal generation
 python scripts/debug_uma_signal.py
-
-# Test UMA connectivity
-python scripts/test_uma.py
 
 # Explore a market interactively
 python scripts/explore_market.py
