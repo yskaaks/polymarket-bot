@@ -6,7 +6,9 @@ Ideal for finding daily up/down markets for market making.
 """
 
 import requests
-from typing import Optional
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from typing import Optional, Generator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -56,15 +58,36 @@ class Market:
 
 
 class MarketFetcher:
-    """Fetches and filters markets from Gamma API."""
+    """Fetches and filters markets from Gamma API with robust retries."""
     
     def __init__(self, base_url: Optional[str] = None):
         self.base_url = base_url or get_config().GAMMA_API_URL
+        self.session = requests.Session()
+        
+        # Configure robust retry strategy
+        retry_strategy = Retry(
+            total=5,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET"]
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
     
-    def _get(self, endpoint: str, params: Optional[dict] = None) -> dict:
-        """Make GET request to Gamma API."""
+    def close(self):
+        self.session.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+    
+    def _get(self, endpoint: str, params: Optional[dict] = None) -> dict | list:
+        """Make GET request to Gamma API with retries."""
         url = f"{self.base_url}{endpoint}"
-        response = requests.get(url, params=params, timeout=30)
+        response = self.session.get(url, params=params, timeout=30)
         response.raise_for_status()
         return response.json()
     
@@ -169,6 +192,29 @@ class MarketFetcher:
                 continue
         
         return markets
+
+    def iter_markets(self, limit: int = 500, offset: int = 0, **kwargs) -> Generator[tuple[list[Market], int], None, None]:
+        """Iterate through all markets using offset pagination.
+        
+        Yields:
+            Tuple of (markets, next_offset) where next_offset is -1 when done.
+        """
+        current_offset = offset
+
+        while True:
+            markets = self.get_all_markets(limit=limit, offset=current_offset, **kwargs)
+
+            if not markets:
+                yield [], -1
+                break
+
+            next_offset = current_offset + len(markets)
+            yield markets, next_offset
+
+            if len(markets) < limit:
+                break
+
+            current_offset = next_offset
     
     def get_market_by_slug(self, slug: str) -> Optional[Market]:
         """
