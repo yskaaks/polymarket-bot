@@ -51,51 +51,76 @@ class UmaArbStrategy:
         """
         Main continuous execution loop for the strategy.
         """
-        logger.info("Starting UMA Arb Strategy Orchestrator...")
-        
+        logger.info("=" * 60)
+        logger.info("UMA Arb Strategy Orchestrator")
+        logger.info(f"  Mode:         {'DRY RUN' if not self.pm_client.is_authenticated else 'LIVE'}")
+        logger.info(f"  Poll interval: {poll_interval}s")
+        logger.info(f"  Oracle:        {self.uma_client.oov3_address}")
+        logger.info("=" * 60)
+
         if not self.pm_client.is_authenticated:
             logger.warning("Polymarket client not authenticated. Running in DRY RUN mode.")
-            
-        last_block = self.uma_client.w3.eth.block_number - 100
-        
+
+        if not self.uma_client.w3.is_connected():
+            logger.error("UMA Oracle Web3 connection is not active. Cannot start strategy loop.")
+            return
+
         try:
+            last_block = self.uma_client.w3.eth.block_number - 100
+            scan_count = 0
+
             while True:
                 current_block = self.uma_client.w3.eth.block_number
-                logger.debug(f"Checking blocks {last_block} to {current_block}")
-                
+                block_range = current_block - last_block
+                scan_count += 1
+                logger.info(f"[Scan #{scan_count}] Blocks {last_block}..{current_block} ({block_range} blocks)")
+
                 # --- LAYER 0: Ingestion ---
                 settlements = self.uma_client.get_recent_settlements(from_block=last_block, to_block=current_block)
-                
-                for settlement in settlements:
-                    logger.info(f"Ingested UMA Settlement: {settlement.get('identifier')}")
-                    
+
+                if settlements:
+                    logger.info(f"  Found {len(settlements)} settlement(s)")
+                else:
+                    logger.info(f"  No settlements found")
+
+                for i, settlement in enumerate(settlements, 1):
+                    logger.info("-" * 50)
+                    logger.info(f"  Settlement {i}/{len(settlements)}")
+                    logger.info(f"    Tx:             {settlement.get('transactionHash', '?')}")
+                    logger.info(f"    Block:          {settlement.get('blockNumber', '?')}")
+                    logger.info(f"    Identifier:     {settlement.get('identifier', '?')[:20]}...")
+                    logger.info(f"    Resolved price: {settlement.get('resolvedPrice')}")
+                    logger.info(f"    Settled price:  {settlement.get('settledPrice')}")
+                    logger.info(f"    Expiration:     {settlement.get('expirationTimestamp')}")
+
                     # --- LAYER 2: Signals ---
                     signal = self.signal_generator.generate_signal(settlement)
-                    
+
                     if signal:
                         # --- LAYER 3: Portfolio & Risk ---
                         is_approved = self.risk_manager.validate_signal(signal)
-                        
+
                         if is_approved:
                             # --- LAYER 4: Execution ---
                             self.execution_agent.execute_trade(signal)
-                            
-                            # --- LAYER 5: Monitoring ---
-                            # e.g., self.monitoring_agent.record_trade(signal)
-                
+                    else:
+                        logger.info(f"    -> No signal generated (no PM match or no edge)")
+
                 last_block = current_block + 1
+                logger.info(f"  Sleeping {poll_interval}s...")
                 time.sleep(poll_interval)
-                
+
         except KeyboardInterrupt:
             logger.info("Stopping UMA Arb Strategy Orchestrator.")
         except Exception as e:
-            logger.error(f"Strategy Loop Error: {e}")
+            logger.error(f"Strategy Loop Error: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        format='%(asctime)s | %(levelname)-8s | %(message)s',
+        datefmt='%H:%M:%S'
     )
 
     config = get_config()

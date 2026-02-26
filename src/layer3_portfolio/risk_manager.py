@@ -16,11 +16,12 @@ class PortfolioRiskManager:
         Check if the generated signal passes risk parameters.
         """
         confidence = signal.get("confidence", 0)
-        
-        # In a real scenario, this would check current portfolio exposure
+
+        logger.info(f"    Risk check: confidence={confidence:.2f} (min=0.60), max_size=${self.max_trade_size:.0f}")
+
         if confidence < 0.60:
-            logger.warning(f"Signal rejected by Risk Manager: Confidence {confidence} too low.")
+            logger.warning(f"    REJECTED: Confidence {confidence:.2f} below threshold")
             return False
-            
-        logger.info(f"Signal approved by Risk Manager.")
+
+        logger.info(f"    APPROVED by Risk Manager")
         return True

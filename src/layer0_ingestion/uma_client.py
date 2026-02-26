@@ -108,11 +108,10 @@ class UMAClient:
             List of parsed event dictionaries
         """
         try:
-            event_filter = self.contract.events.Settle.create_filter(
-                fromBlock=from_block,
-                toBlock=to_block
+            entries = self.contract.events.Settle.get_logs(
+                from_block=from_block,
+                to_block=to_block
             )
-            entries = event_filter.get_all_entries()
             
             settlements = []
             for entry in entries:

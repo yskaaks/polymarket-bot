@@ -46,7 +46,7 @@ class Config:
         self.funder_address = os.getenv("FUNDER_ADDRESS")
         self.signature_type = int(os.getenv("SIGNATURE_TYPE", "0"))
         self.dry_run = os.getenv("DRY_RUN", "1") == "1"
-        self.polygon_rpc_url = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
+        self.polygon_rpc_url = os.getenv("POLYGON_RPC_URL", "https://polygon-bor-rpc.publicnode.com")
     
     @property
     def has_credentials(self) -> bool:
