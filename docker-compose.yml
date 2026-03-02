@@ -1,0 +1,16 @@
+services:
+  polymarket-bot:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import src.layer0_ingestion.uma_client"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
