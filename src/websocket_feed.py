@@ -6,9 +6,12 @@ Real-time data streaming from Polymarket.
 
 import asyncio
 import json
+import logging
 from typing import Callable, Optional
 from dataclasses import dataclass
 import websockets
+
+logger = logging.getLogger(__name__)
 
 import sys
 sys.path.insert(0, str(__file__).rsplit("src", 1)[0])
@@ -52,7 +55,7 @@ class WebSocketFeed:
     - Orderbook changes
     """
     
-    def __init__(self, url: Optional[str] = None):
+    def __init__(self, url: Optional[str] = None, max_reconnect_delay: float = 60.0):
         """Initialize WebSocket feed."""
         self.url = url or get_config().WEBSOCKET_URL
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
@@ -64,6 +67,8 @@ class WebSocketFeed:
             "error": [],
         }
         self._subscriptions: set[str] = set()
+        self._reconnect_delay = 1.0
+        self._max_reconnect_delay = max_reconnect_delay
     
     def on_price(self, callback: Callable[[PriceUpdate], None]):
         """Register callback for price updates."""
@@ -185,46 +190,57 @@ class WebSocketFeed:
     async def listen(self):
         """
         Start listening for messages.
-        
+
         This is a blocking call - run in background task.
         """
         if not self._ws:
             raise RuntimeError("Not connected")
-        
+
         try:
             async for message in self._ws:
                 if not self._running:
                     break
-                
+
                 try:
                     data = json.loads(message)
                     await self._handle_message(data)
                 except json.JSONDecodeError:
-                    print(f"Invalid JSON: {message[:100]}")
+                    logger.warning(f"Invalid JSON: {message[:100]}")
                 except Exception as e:
                     for cb in self._callbacks["error"]:
                         cb(e)
-                    
+
         except websockets.exceptions.ConnectionClosed:
-            print("WebSocket connection closed")
+            logger.warning("WebSocket connection closed")
         except Exception as e:
-            print(f"WebSocket error: {e}")
+            logger.error(f"WebSocket error: {e}")
             for cb in self._callbacks["error"]:
                 cb(e)
-    
+
     async def run(self, token_ids: list[str]):
         """
-        Connect, subscribe, and listen.
-        
+        Connect, subscribe, and listen with auto-reconnect.
+
         Args:
             token_ids: List of token IDs to subscribe to
         """
-        await self.connect()
-        
-        for token_id in token_ids:
-            await self.subscribe_market(token_id)
-        
-        await self.listen()
+        self._running = True
+        delay = self._reconnect_delay
+
+        while self._running:
+            try:
+                await self.connect()
+                delay = self._reconnect_delay  # reset on successful connect
+                for token_id in token_ids:
+                    await self.subscribe_market(token_id)
+                await self.listen()
+            except Exception as e:
+                logger.error(f"WebSocket run error: {e}")
+
+            if self._running:
+                logger.info(f"Reconnecting in {delay:.1f}s...")
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, self._max_reconnect_delay)
 
 
 # Synchronous wrapper for simpler usage

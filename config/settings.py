@@ -51,6 +51,10 @@ class Config:
         self.polygon_rpc_url = os.getenv("POLYGON_RPC_URL", "https://polygon-bor-rpc.publicnode.com")
         self.max_order_size = float(os.getenv("MAX_ORDER_SIZE", "5.0"))
         self.min_edge = float(os.getenv("MIN_EDGE", "0.02"))
+
+        # WebSocket RPC URL (defaults to converting HTTP Alchemy URL to WSS)
+        default_ws_url = self.polygon_rpc_url.replace("https://", "wss://").replace("http://", "ws://")
+        self.polygon_ws_url = os.getenv("POLYGON_WS_URL", default_ws_url)
     
     @property
     def has_credentials(self) -> bool:
