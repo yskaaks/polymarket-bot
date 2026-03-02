@@ -95,7 +95,7 @@ class UMAClient:
         self.oov3_address = Web3.to_checksum_address(oov3_address)
         self.contract: Contract = self.w3.eth.contract(address=self.oov3_address, abi=OOV3_ABI)
 
-    def get_recent_settlements(self, from_block: int, to_block: str = 'latest') -> List[Dict[str, Any]]:
+    def get_recent_settlements(self, from_block: int, to_block: int | str = 'latest') -> List[Dict[str, Any]]:
         """
         Fetch recent 'Settle' events from the Optimistic Oracle.
         These represent resolved oracle requests.
@@ -107,29 +107,36 @@ class UMAClient:
         Returns:
             List of parsed event dictionaries
         """
-        try:
-            entries = self.contract.events.Settle.get_logs(
-                from_block=from_block,
-                to_block=to_block
-            )
-            
-            settlements = []
-            for entry in entries:
-                args = entry['args']
-                settlements.append({
-                    'transactionHash': entry['transactionHash'].hex(),
-                    'blockNumber': entry['blockNumber'],
-                    'identifier': args['identifier'].hex(),
-                    'expirationTimestamp': args['expirationTimestamp'],
-                    'ancillaryData': args['ancillaryData'].hex(),
-                    'resolvedPrice': args['resolvedPrice'],
-                    'settledPrice': args['settledPrice']
-                })
-                
-            return settlements
-        except Exception as e:
-            logger.error(f"Error fetching settlements: {e}")
-            return []
+        if to_block == 'latest':
+            to_block = self.w3.eth.block_number
+
+        settlements = []
+        chunk_size = 10  # Alchemy free tier limits eth_getLogs to 10 blocks
+        start = from_block
+
+        while start <= to_block:
+            end = min(start + chunk_size - 1, to_block)
+            try:
+                entries = self.contract.events.Settle.get_logs(
+                    from_block=start,
+                    to_block=end
+                )
+                for entry in entries:
+                    args = entry['args']
+                    settlements.append({
+                        'transactionHash': entry['transactionHash'].hex(),
+                        'blockNumber': entry['blockNumber'],
+                        'identifier': args['identifier'].hex(),
+                        'expirationTimestamp': args['expirationTimestamp'],
+                        'ancillaryData': args['ancillaryData'].hex(),
+                        'resolvedPrice': args['resolvedPrice'],
+                        'settledPrice': args['settledPrice']
+                    })
+            except Exception as e:
+                logger.error(f"Error fetching settlements for blocks {start}..{end}: {e}")
+            start = end + 1
+
+        return settlements
             
     def parse_ancillary_data(self, ancillary_data_hex: str) -> str:
         """

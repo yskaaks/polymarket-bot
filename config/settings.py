@@ -32,6 +32,8 @@ class Config:
     
     # Trading settings
     dry_run: bool = True  # Safety: default to dry run
+    max_order_size: float = 5.0  # Max USDC per order
+    min_edge: float = 0.02  # Min edge (2%) to trigger trade
     
     # Contract addresses (Polygon)
     USDC_ADDRESS: str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
@@ -47,6 +49,8 @@ class Config:
         self.signature_type = int(os.getenv("SIGNATURE_TYPE", "0"))
         self.dry_run = os.getenv("DRY_RUN", "1") == "1"
         self.polygon_rpc_url = os.getenv("POLYGON_RPC_URL", "https://polygon-bor-rpc.publicnode.com")
+        self.max_order_size = float(os.getenv("MAX_ORDER_SIZE", "5.0"))
+        self.min_edge = float(os.getenv("MIN_EDGE", "0.02"))
     
     @property
     def has_credentials(self) -> bool:

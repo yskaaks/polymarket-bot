@@ -34,8 +34,9 @@ class UmaArbStrategy:
         
         # Layer 2: Signals
         self.signal_generator = UmaArbSignalGenerator(
-            uma_client=self.uma_client, 
-            market_fetcher=self.market_fetcher
+            uma_client=self.uma_client,
+            market_fetcher=self.market_fetcher,
+            clob_client=self.pm_client.clob if self.pm_client._clob_client else None
         )
         
         # Layer 3: Portfolio & Risk
@@ -53,9 +54,11 @@ class UmaArbStrategy:
         """
         logger.info("=" * 60)
         logger.info("UMA Arb Strategy Orchestrator")
-        logger.info(f"  Mode:         {'DRY RUN' if not self.pm_client.is_authenticated else 'LIVE'}")
-        logger.info(f"  Poll interval: {poll_interval}s")
-        logger.info(f"  Oracle:        {self.uma_client.oov3_address}")
+        logger.info(f"  Mode:           {'DRY RUN' if not self.pm_client.is_authenticated else 'LIVE'}")
+        logger.info(f"  Poll interval:  {poll_interval}s")
+        logger.info(f"  Oracle:         {self.uma_client.oov3_address}")
+        logger.info(f"  Max order size: ${self.config.max_order_size:.2f}")
+        logger.info(f"  Min edge:       {self.config.min_edge:.2%}")
         logger.info("=" * 60)
 
         if not self.pm_client.is_authenticated:
