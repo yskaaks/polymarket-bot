@@ -59,6 +59,18 @@ class Config:
         # Telegram notifications
         self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+
+        # Market-making settings
+        self.mm_max_markets = int(os.getenv("MM_MAX_MARKETS", "5"))
+        self.mm_max_position_per_market = float(os.getenv("MM_MAX_POSITION_PER_MARKET", "2000"))
+        self.mm_max_total_exposure = float(os.getenv("MM_MAX_TOTAL_EXPOSURE", "20000"))
+        self.mm_min_spread = float(os.getenv("MM_MIN_SPREAD", "0.03"))
+        self.mm_max_spread = float(os.getenv("MM_MAX_SPREAD", "0.20"))
+        self.mm_min_liquidity = float(os.getenv("MM_MIN_LIQUIDITY", "5000"))
+        self.mm_min_volume_24h = float(os.getenv("MM_MIN_VOLUME_24H", "2000"))
+        self.mm_quote_refresh = float(os.getenv("MM_QUOTE_REFRESH", "10"))
+        self.mm_capital = float(os.getenv("MM_CAPITAL", "100000"))
+        self.mm_stop_loss_per_market = float(os.getenv("MM_STOP_LOSS_PER_MARKET", "-200"))
     
     @property
     def has_credentials(self) -> bool:

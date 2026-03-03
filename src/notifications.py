@@ -88,6 +88,24 @@ class TelegramNotifier:
         """Send error notification."""
         self.send(f"\u26A0\uFE0F <b>Error</b>\n<code>{_escape(error[:500])}</code>")
 
+    def notify_mm_status(
+        self,
+        active_markets: int,
+        active_quotes: int,
+        total_exposure: float,
+        realized_pnl: float,
+        fills_since_last: int = 0,
+    ) -> bool:
+        """Send periodic market-maker status update."""
+        msg = (
+            f"<b>MM Status</b>\n"
+            f"Markets: {active_markets} | Quotes: {active_quotes}\n"
+            f"Exposure: ${total_exposure:,.0f}\n"
+            f"Realized PnL: ${realized_pnl:+,.2f}\n"
+            f"Fills: {fills_since_last}"
+        )
+        return self.send(msg)
+
 
 def _escape(text: str) -> str:
     """Escape HTML special chars for Telegram."""
