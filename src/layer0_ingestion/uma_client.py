@@ -159,7 +159,7 @@ class UMAClient:
 
 
 # Settle event topic0: keccak256 of the Settle event signature
-SETTLE_EVENT_TOPIC = Web3.keccak(
+SETTLE_EVENT_TOPIC = "0x" + Web3.keccak(
     text="Settle(address,bytes32,uint32,bytes,address,address,address,int256,int256)"
 ).hex()
 
@@ -192,7 +192,7 @@ class UMAWebSocketClient:
             "params": [
                 "logs",
                 {
-                    "address": self.oov3_address,
+                    "address": self.oov3_address.lower(),
                     "topics": [SETTLE_EVENT_TOPIC]
                 }
             ]
@@ -297,7 +297,7 @@ class UMAWebSocketClient:
             if self._running:
                 logger.info(f"Reconnecting in {delay:.1f}s...")
                 await asyncio.sleep(delay)
-                delay = min(delay * 2, self._max_reconnect_delay)
+                delay = min(delay * 2.0, self._max_reconnect_delay)
 
     async def stop(self):
         """Stop the WebSocket listener."""

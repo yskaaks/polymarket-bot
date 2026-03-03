@@ -173,30 +173,34 @@ class UmaArbStrategy:
         logger.info("WebSocket listener started in background thread")
 
         # Polling fallback loop (catches anything the WebSocket might miss)
+        last_block = self.uma_client.w3.eth.block_number - 100
+        scan_count = 0
+
         try:
-            last_block = self.uma_client.w3.eth.block_number - 100
-            scan_count = 0
-
             while True:
-                current_block = self.uma_client.w3.eth.block_number
-                block_range = current_block - last_block
-                scan_count += 1
-                logger.debug(f"[Fallback scan #{scan_count}] Blocks {last_block}..{current_block} ({block_range} blocks)")
+                try:
+                    current_block = self.uma_client.w3.eth.block_number
+                    block_range = current_block - last_block
+                    scan_count += 1
+                    logger.info(f"[Fallback scan #{scan_count}] Blocks {last_block}..{current_block} ({block_range} blocks)")
 
-                settlements = self.uma_client.get_recent_settlements(from_block=last_block, to_block=current_block)
-                if settlements:
-                    logger.info(f"  Fallback found {len(settlements)} settlement(s)")
-                    for settlement in settlements:
-                        self._handle_settlement(settlement)
+                    settlements = self.uma_client.get_recent_settlements(from_block=last_block, to_block=current_block)
+                    if settlements:
+                        logger.info(f"  Fallback found {len(settlements)} settlement(s)")
+                        for settlement in settlements:
+                            self._handle_settlement(settlement)
 
-                last_block = current_block + 1
+                    last_block = current_block + 1
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    logger.error(f"Fallback scan error (will retry): {e}", exc_info=True)
+
                 time.sleep(fallback_poll_interval)
 
         except KeyboardInterrupt:
             logger.info("Stopping UMA Arb Strategy Orchestrator.")
             asyncio.run(ws_client.stop())
-        except Exception as e:
-            logger.error(f"Strategy Loop Error: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
