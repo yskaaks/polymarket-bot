@@ -6,6 +6,7 @@ from typing import Dict, Any
 from config.settings import get_config
 from src.layer0_ingestion.polymarket_clob import PolymarketClient
 from src.layer4_execution.trading import TradingClient
+from src.notifications import get_notifier
 from src.utils import round_size, round_price, is_valid_price, now_timestamp
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,7 @@ class ExecutionAgent:
             trade_record["status"] = "dry_run"
             trade_record["reason"] = "not_authenticated"
             _append_trade_log(trade_record)
+            get_notifier().notify_trade(trade_record)
             return
 
         # Place order via TradingClient (respects config.dry_run internally)
@@ -121,3 +123,4 @@ class ExecutionAgent:
             trade_record["error"] = result.error
 
         _append_trade_log(trade_record)
+        get_notifier().notify_trade(trade_record)

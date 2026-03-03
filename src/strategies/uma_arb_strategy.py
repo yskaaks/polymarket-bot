@@ -12,6 +12,7 @@ from src.layer0_ingestion.uma_client import UMAClient, UMAWebSocketClient
 from src.layer2_signals.uma_arb_signal import UmaArbSignalGenerator
 from src.layer3_portfolio.risk_manager import PortfolioRiskManager
 from src.layer4_execution.execution_agent import ExecutionAgent
+from src.notifications import get_notifier
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,8 @@ class UmaArbStrategy:
 
         if not self.pm_client.is_authenticated:
             logger.warning("Polymarket client not authenticated. Running in DRY RUN mode.")
+
+        get_notifier().notify_startup("REALTIME", self.config.dry_run)
 
         # Create WebSocket client for real-time events
         ws_client = UMAWebSocketClient(ws_url=ws_url, oov3_address=self.uma_client.oov3_address)

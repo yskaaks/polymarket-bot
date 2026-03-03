@@ -55,6 +55,10 @@ class Config:
         # WebSocket RPC URL (defaults to converting HTTP Alchemy URL to WSS)
         default_ws_url = self.polygon_rpc_url.replace("https://", "wss://").replace("http://", "ws://")
         self.polygon_ws_url = os.getenv("POLYGON_WS_URL", default_ws_url)
+
+        # Telegram notifications
+        self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
     
     @property
     def has_credentials(self) -> bool:
