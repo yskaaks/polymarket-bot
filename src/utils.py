@@ -5,7 +5,9 @@ Common helpers for logging, formatting, and calculations.
 """
 
 import logging
+import os
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 from decimal import Decimal, ROUND_DOWN
 
@@ -39,16 +41,20 @@ def setup_logging(level: str = "INFO", log_file: Optional[str] = None) -> loggin
     
     # File handler (optional)
     if log_file:
-        file_handler = logging.FileHandler(log_file)
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_file, maxBytes=10 * 1024 * 1024, backupCount=5
+        )
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
-    
+
     return logger
 
 
-# Global logger
-logger = setup_logging()
+# Global logger — always write to logs/polymarket.log
+_log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+logger = setup_logging(log_file=os.path.join(_log_dir, "polymarket.log"))
 
 
 def log_trade(action: str, token_id: str, side: str, price: float, size: float):
