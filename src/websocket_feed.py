@@ -91,9 +91,9 @@ class WebSocketFeed:
         try:
             self._ws = await websockets.connect(self.url)
             self._running = True
-            print(f"Connected to WebSocket: {self.url}")
+            logger.info(f"Connected to WebSocket: {self.url}")
         except Exception as e:
-            print(f"WebSocket connection failed: {e}")
+            logger.error(f"WebSocket connection failed: {e}")
             raise
     
     async def disconnect(self):
@@ -102,90 +102,109 @@ class WebSocketFeed:
         if self._ws:
             await self._ws.close()
             self._ws = None
-        print("Disconnected from WebSocket")
+        logger.info("Disconnected from WebSocket")
     
     async def subscribe_market(self, token_id: str):
         """
         Subscribe to updates for a market.
-        
+
         Args:
             token_id: CLOB token ID
         """
         if not self._ws:
             raise RuntimeError("Not connected")
-        
-        # Polymarket WebSocket subscription format
-        subscribe_msg = {
-            "type": "subscribe",
-            "channel": "market",
-            "markets": [token_id]
-        }
-        
-        await self._ws.send(json.dumps(subscribe_msg))
+
         self._subscriptions.add(token_id)
-        print(f"Subscribed to market: {token_id}")
+        # Send a single subscription message with all current asset IDs
+        await self._send_subscription()
+        logger.info(f"Subscribed to market: {token_id}")
+
+    async def _send_subscription(self):
+        """Send subscription message with all tracked asset IDs."""
+        if not self._ws or not self._subscriptions:
+            return
+        subscribe_msg = {
+            "type": "market",
+            "assets_ids": list(self._subscriptions),
+        }
+        await self._ws.send(json.dumps(subscribe_msg))
     
     async def unsubscribe_market(self, token_id: str):
         """
         Unsubscribe from market updates.
-        
+
         Args:
             token_id: CLOB token ID
         """
         if not self._ws:
             return
-        
-        unsubscribe_msg = {
-            "type": "unsubscribe", 
-            "channel": "market",
-            "markets": [token_id]
-        }
-        
-        await self._ws.send(json.dumps(unsubscribe_msg))
+
         self._subscriptions.discard(token_id)
+        # Re-send subscription with remaining asset IDs (replaces previous subscription)
+        if self._subscriptions:
+            await self._send_subscription()
+        else:
+            # No subscriptions left — close and let reconnect loop handle it
+            await self._ws.close()
     
-    async def _handle_message(self, data: dict):
-        """Process incoming WebSocket message."""
-        msg_type = data.get("type", "")
-        
-        if msg_type == "price_change":
-            update = PriceUpdate(
-                token_id=data.get("asset_id", ""),
-                price=float(data.get("price", 0)),
-                timestamp=data.get("timestamp", "")
-            )
-            for cb in self._callbacks["price"]:
-                try:
-                    cb(update)
-                except Exception as e:
-                    print(f"Price callback error: {e}")
-        
-        elif msg_type == "trade":
-            update = TradeUpdate(
-                token_id=data.get("asset_id", ""),
-                price=float(data.get("price", 0)),
-                size=float(data.get("size", 0)),
-                side=data.get("side", ""),
-                timestamp=data.get("timestamp", "")
-            )
-            for cb in self._callbacks["trade"]:
-                try:
-                    cb(update)
-                except Exception as e:
-                    print(f"Trade callback error: {e}")
-        
-        elif msg_type == "book":
-            update = OrderbookUpdate(
-                token_id=data.get("asset_id", ""),
-                bids=data.get("bids", []),
-                asks=data.get("asks", []),
-                timestamp=data.get("timestamp", "")
-            )
-            for cb in self._callbacks["orderbook"]:
-                try:
-                    cb(update)
-                except Exception as e:
-                    print(f"Orderbook callback error: {e}")
+    async def _handle_message(self, raw: str):
+        """Process incoming WebSocket message.
+
+        Polymarket sends two kinds of messages:
+        - Initial book snapshot: a JSON *array* with asset_id, bids, asks
+        - Subsequent updates: a JSON object with ``price_changes`` list
+        """
+        data = json.loads(raw)
+
+        # Initial orderbook snapshot comes as an array
+        if isinstance(data, list):
+            for entry in data:
+                update = OrderbookUpdate(
+                    token_id=entry.get("asset_id", ""),
+                    bids=entry.get("bids", []),
+                    asks=entry.get("asks", []),
+                    timestamp=entry.get("timestamp", ""),
+                )
+                for cb in self._callbacks["orderbook"]:
+                    try:
+                        cb(update)
+                    except Exception as e:
+                        logger.error(f"Orderbook callback error: {e}")
+            return
+
+        # Price / trade change events
+        if "price_changes" in data:
+            for change in data["price_changes"]:
+                asset_id = change.get("asset_id", "")
+                if asset_id not in self._subscriptions:
+                    continue
+
+                price_update = PriceUpdate(
+                    token_id=asset_id,
+                    price=float(change.get("price", 0)),
+                    timestamp=data.get("timestamp", change.get("timestamp", "")),
+                )
+                for cb in self._callbacks["price"]:
+                    try:
+                        cb(price_update)
+                    except Exception as e:
+                        logger.error(f"Price callback error: {e}")
+
+                # Also emit as trade when size is present
+                size = float(change.get("size", 0))
+                if size > 0:
+                    trade_update = TradeUpdate(
+                        token_id=asset_id,
+                        price=float(change.get("price", 0)),
+                        size=size,
+                        side=change.get("side", ""),
+                        timestamp=data.get("timestamp", change.get("timestamp", "")),
+                    )
+                    for cb in self._callbacks["trade"]:
+                        try:
+                            cb(trade_update)
+                        except Exception as e:
+                            logger.error(f"Trade callback error: {e}")
     
     async def listen(self):
         """
@@ -202,11 +221,11 @@ class WebSocketFeed:
                     break
 
                 try:
-                    data = json.loads(message)
-                    await self._handle_message(data)
+                    await self._handle_message(message)
                 except json.JSONDecodeError:
                     logger.warning(f"Invalid JSON: {message[:100]}")
                 except Exception as e:
+                    logger.error(f"Message handler error: {e}")
                     for cb in self._callbacks["error"]:
                         cb(e)
 
@@ -225,14 +244,14 @@ class WebSocketFeed:
             token_ids: List of token IDs to subscribe to
         """
         self._running = True
+        self._subscriptions = set(token_ids)
         delay = self._reconnect_delay
 
         while self._running:
             try:
                 await self.connect()
                 delay = self._reconnect_delay  # reset on successful connect
-                for token_id in token_ids:
-                    await self.subscribe_market(token_id)
+                await self._send_subscription()
                 await self.listen()
             except Exception as e:
                 logger.error(f"WebSocket run error: {e}")

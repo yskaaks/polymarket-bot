@@ -319,17 +319,17 @@ class MarketFetcher:
         self,
         min_volume_24h: float = 10000,
         min_liquidity: float = 5000,
-        limit: int = 50
+        limit: int = 200
     ) -> list[Market]:
         """
         Get markets with high volume and liquidity.
         Better for market making due to more activity.
-        
+
         Args:
             min_volume_24h: Minimum 24h volume in USDC
             min_liquidity: Minimum liquidity
-            limit: Max markets
-        
+            limit: Max markets to fetch from API (fetch wide, filter downstream)
+
         Returns:
             High volume/liquidity markets
         """
