@@ -37,9 +37,10 @@ class InventoryPosition:
 
 
 class InventoryTracker:
-    """Tracks net position per token and computes quote skew."""
+    """Tracks net position per token and computes quote skew in logit space."""
 
-    MAX_SKEW: float = 0.03  # ±3% max skew adjustment
+    MAX_SKEW_LOGIT: float = 0.30  # ±0.30 max skew in logit space
+    # At p=0.50 this shifts ~7%, at p=0.90 this shifts ~3% — correct behavior
 
     def __init__(self):
         self._positions: dict[str, InventoryPosition] = {}
@@ -77,10 +78,17 @@ class InventoryTracker:
 
     def get_quote_skew(self, token_id: str) -> float:
         """
-        Compute quote skew based on inventory.
-        Long position → negative skew (shift quotes down to sell more).
-        Short position → positive skew (shift quotes up to buy more).
-        Linear scaling up to ±MAX_SKEW.
+        Compute quote skew in logit space based on inventory.
+
+        Long position → negative logit skew (shift quotes down to sell more).
+        Short position → positive logit skew (shift quotes up to buy more).
+        Linear scaling up to ±MAX_SKEW_LOGIT.
+
+        Returns a logit-space adjustment to be applied via logit_adjust() or
+        added directly to the fair value's logit representation. This naturally
+        produces smaller probability-space shifts near boundaries (correct
+        behavior: pushing price from 0.90 to 0.93 is reckless, but logit-space
+        prevents it).
         """
         config = get_config()
         pos = self.get_position(token_id)
@@ -89,12 +97,11 @@ class InventoryTracker:
         if max_pos <= 0 or pos.net_quantity == 0:
             return 0.0
 
-        # Normalize: position as fraction of max, then scale by max skew
         inventory_ratio = pos.net_quantity / max_pos
         inventory_ratio = max(-1.0, min(1.0, inventory_ratio))
-        skew = -inventory_ratio * self.MAX_SKEW
+        skew_logit = -inventory_ratio * self.MAX_SKEW_LOGIT
 
-        return skew
+        return skew_logit
 
     def get_net_exposure(self, token_id: str) -> float:
         """Absolute USDC exposure for a token."""

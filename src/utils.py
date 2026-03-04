@@ -230,6 +230,70 @@ def kelly_criterion(win_prob: float, win_amount: float, loss_amount: float) -> f
     return max(0, kelly)  # Never recommend negative bet
 
 
+# Logit-space math for prediction market probabilities
+import math
+
+
+def logit(p: float) -> float:
+    """
+    Transform probability p ∈ (0,1) to log-odds space ∈ (-∞, +∞).
+    logit(p) = log(p / (1-p))
+    """
+    p = max(1e-9, min(1 - 1e-9, p))
+    return math.log(p / (1 - p))
+
+
+def expit(x: float) -> float:
+    """
+    Inverse logit: transform log-odds back to probability ∈ (0,1).
+    expit(x) = 1 / (1 + exp(-x))
+    """
+    if x > 500:
+        return 1.0 - 1e-9
+    if x < -500:
+        return 1e-9
+    return 1.0 / (1.0 + math.exp(-x))
+
+
+def logit_adjust(p: float, adjustment: float) -> float:
+    """
+    Apply an additive adjustment in logit space, return result in probability space.
+    Equivalent to: expit(logit(p) + adjustment)
+
+    This is the correct way to shift prediction market prices:
+    - At p=0.50, a logit adjustment of 0.1 moves price ~2.5%
+    - At p=0.90, the same adjustment moves price ~0.9%
+    - Naturally bounded in (0,1)
+    """
+    return expit(logit(p) + adjustment)
+
+
+def logit_midpoint(p1: float, p2: float, weight1: float = 0.5) -> float:
+    """
+    Weighted average of two probabilities in logit space.
+    More correct than linear blending for probabilities.
+    """
+    l1 = logit(p1)
+    l2 = logit(p2)
+    blended = weight1 * l1 + (1 - weight1) * l2
+    return expit(blended)
+
+
+def logit_spread(p: float, half_width_logit: float) -> tuple[float, float]:
+    """
+    Compute symmetric spread around p in logit space.
+    Returns (bid, ask) in probability space.
+
+    A constant logit half-width naturally produces:
+    - Tight spreads near 0.50 (high certainty zone)
+    - Wide spreads near 0 or 1 (where small prob changes are meaningful)
+    """
+    center = logit(p)
+    bid = expit(center - half_width_logit)
+    ask = expit(center + half_width_logit)
+    return bid, ask
+
+
 def implied_probability_to_odds(prob: float) -> float:
     """Convert implied probability to decimal odds."""
     if prob <= 0 or prob >= 1:

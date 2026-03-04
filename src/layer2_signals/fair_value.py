@@ -1,7 +1,8 @@
 """
 Fair value estimation for market making.
 
-Computes fair value from orderbook midpoint, imbalance adjustment, and VWAP blend.
+All adjustments happen in logit (log-odds) space, which is the correct
+transform for prediction market probabilities bounded in (0,1).
 Extensible via SignalProvider interface for Phase 2/3 signal integration.
 """
 
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from src.orderbook import Orderbook
+from src.utils import logit, expit, logit_adjust, logit_midpoint, logit_spread
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +21,14 @@ logger = logging.getLogger(__name__)
 class FairValueEstimate:
     """Result of fair value estimation."""
     fair_value: float
-    spread: float  # recommended spread
+    bid_price: float  # recommended bid (from logit spread)
+    ask_price: float  # recommended ask (from logit spread)
+    spread: float  # ask - bid in probability space
     confidence: float  # 0-1, how confident we are in this estimate
     midpoint: float
-    imbalance_adj: float
-    vwap_adj: float
-    signal_adj: float = 0.0  # from registered SignalProviders
+    imbalance_adj_logit: float  # adjustment applied in logit space
+    vwap_adj_logit: float
+    signal_adj_logit: float = 0.0
 
 
 class SignalProvider(ABC):
@@ -32,7 +36,7 @@ class SignalProvider(ABC):
 
     @abstractmethod
     def get_adjustment(self, token_id: str, current_fv: float) -> float:
-        """Return price adjustment to apply to fair value. Positive = bullish."""
+        """Return adjustment in logit space. Positive = bullish."""
         ...
 
     @property
@@ -45,16 +49,20 @@ class FairValueEngine:
     """
     Estimates fair value and recommended spread for a token.
 
-    Components:
-    1. Orderbook midpoint (base)
-    2. Imbalance adjustment (±0.5% max based on bid/ask depth ratio)
-    3. VWAP midpoint blend (if last trade price available)
-    4. Signal providers (Phase 2/3 extension point)
+    All math is done in logit space:
+    - p → logit(p) = log(p/(1-p))
+    - adjustments are additive in logit space
+    - expit(x) = 1/(1+exp(-x)) maps back to probability
+
+    This ensures adjustments scale correctly near boundaries:
+    a 0.1 logit shift at p=0.50 ≈ 2.5% move, at p=0.90 ≈ 0.9% move.
     """
 
-    IMBALANCE_MAX_ADJ: float = 0.005  # ±0.5% max imbalance adjustment
-    MIN_SPREAD: float = 0.02  # 2% floor on spread recommendation
-    VWAP_WEIGHT: float = 0.3  # 30% weight on VWAP/last trade vs 70% midpoint
+    IMBALANCE_MAX_ADJ_LOGIT: float = 0.10  # max imbalance adjustment in logit space
+    MIN_SPREAD_LOGIT: float = 0.15  # min half-spread in logit space (~2% at p=0.50)
+    VWAP_WEIGHT: float = 0.3  # 30% weight on VWAP in logit-space blend
+    DEPTH_THIN_THRESHOLD: float = 100  # shares
+    DEPTH_MODERATE_THRESHOLD: float = 500
 
     def __init__(self):
         self._signals: list[SignalProvider] = []
@@ -81,82 +89,97 @@ class FairValueEngine:
             FairValueEstimate or None if orderbook is insufficient
         """
         midpoint = orderbook.midpoint
-        if midpoint is None:
-            logger.warning(f"Cannot estimate FV for {token_id[:8]}...: no midpoint")
+        if midpoint is None or midpoint <= 0 or midpoint >= 1:
+            logger.warning(f"Cannot estimate FV for {token_id[:8]}...: invalid midpoint {midpoint}")
             return None
 
-        # 1. Imbalance adjustment
+        # Work in logit space
+        mid_logit = logit(midpoint)
+
+        # 1. Imbalance adjustment in logit space
         imbalance = orderbook.imbalance(levels=5)  # -1 to 1
-        imbalance_adj = imbalance * self.IMBALANCE_MAX_ADJ * midpoint
+        imbalance_adj_logit = imbalance * self.IMBALANCE_MAX_ADJ_LOGIT
 
-        # 2. VWAP/last trade blend
-        vwap_adj = 0.0
-        if last_trade_price is not None and last_trade_price > 0:
-            vwap_mid = last_trade_price
-            blended = (1 - self.VWAP_WEIGHT) * midpoint + self.VWAP_WEIGHT * vwap_mid
-            vwap_adj = blended - midpoint
+        # 2. VWAP/last trade blend in logit space
+        vwap_adj_logit = 0.0
+        if last_trade_price is not None and 0 < last_trade_price < 1:
+            blended_logit = logit(midpoint) * (1 - self.VWAP_WEIGHT) + logit(last_trade_price) * self.VWAP_WEIGHT
+            vwap_adj_logit = blended_logit - mid_logit
 
-        fair_value = midpoint + imbalance_adj + vwap_adj
+        fv_logit = mid_logit + imbalance_adj_logit + vwap_adj_logit
 
-        # 3. Signal provider adjustments
-        signal_adj = 0.0
+        # 3. Signal provider adjustments (in logit space)
+        signal_adj_logit = 0.0
         for provider in self._signals:
             try:
-                adj = provider.get_adjustment(token_id, fair_value)
-                signal_adj += adj
+                adj = provider.get_adjustment(token_id, expit(fv_logit))
+                signal_adj_logit += adj
             except Exception as e:
                 logger.warning(f"Signal provider {provider.name} failed: {e}")
-        fair_value += signal_adj
+        fv_logit += signal_adj_logit
 
-        # Clamp to valid price range
-        fair_value = max(0.01, min(0.99, fair_value))
+        fair_value = expit(fv_logit)
 
-        # 4. Spread recommendation
-        spread = self._recommend_spread(orderbook)
+        # 4. Spread in logit space (symmetric in logit = asymmetric in prob)
+        half_spread_logit = self._recommend_half_spread_logit(orderbook)
+        bid_price, ask_price = logit_spread(fair_value, half_spread_logit)
+        spread = ask_price - bid_price
 
-        # 5. Confidence from depth + spread width
+        # 5. Confidence
         confidence = self._compute_confidence(orderbook)
 
         estimate = FairValueEstimate(
             fair_value=fair_value,
+            bid_price=bid_price,
+            ask_price=ask_price,
             spread=spread,
             confidence=confidence,
             midpoint=midpoint,
-            imbalance_adj=imbalance_adj,
-            vwap_adj=vwap_adj,
-            signal_adj=signal_adj,
+            imbalance_adj_logit=imbalance_adj_logit,
+            vwap_adj_logit=vwap_adj_logit,
+            signal_adj_logit=signal_adj_logit,
         )
 
         logger.debug(
             f"FV estimate {token_id[:8]}...: mid={midpoint:.4f} "
-            f"imb_adj={imbalance_adj:+.4f} vwap_adj={vwap_adj:+.4f} "
-            f"→ fv={fair_value:.4f} spread={spread:.4f} conf={confidence:.2f}"
+            f"imb_logit={imbalance_adj_logit:+.3f} vwap_logit={vwap_adj_logit:+.3f} "
+            f"→ fv={fair_value:.4f} bid={bid_price:.4f} ask={ask_price:.4f} "
+            f"spread={spread:.4f} conf={confidence:.2f}"
         )
 
         return estimate
 
-    def _recommend_spread(self, orderbook: Orderbook) -> float:
+    def _recommend_half_spread_logit(self, orderbook: Orderbook) -> float:
         """
-        Recommend a spread based on current market conditions.
-        Never tighter than current spread. Wider for thin books.
-        """
-        current_spread = orderbook.spread or self.MIN_SPREAD
+        Recommend half-spread width in logit space.
+        Wider for thin books, never below MIN_SPREAD_LOGIT.
 
-        # Thin book → wider spread
+        In logit space, a constant half-spread naturally produces
+        tighter prob-space spreads near 0.50 and wider near extremes.
+        """
         bid_depth = orderbook.total_bid_depth(levels=5)
         ask_depth = orderbook.total_ask_depth(levels=5)
         total_depth = bid_depth + ask_depth
 
-        if total_depth < 100:
-            depth_premium = 0.02  # 2% extra for very thin books
-        elif total_depth < 500:
-            depth_premium = 0.01
+        if total_depth < self.DEPTH_THIN_THRESHOLD:
+            depth_premium = 0.15  # significant extra width for thin books
+        elif total_depth < self.DEPTH_MODERATE_THRESHOLD:
+            depth_premium = 0.07
         else:
             depth_premium = 0.0
 
-        recommended = max(current_spread, self.MIN_SPREAD) + depth_premium
+        # Also respect current market spread: don't quote tighter than the book
+        current_spread = orderbook.spread
+        if current_spread is not None and orderbook.midpoint is not None and orderbook.midpoint > 0:
+            # Convert current spread to approximate logit half-width
+            mid = orderbook.midpoint
+            current_ask = mid + current_spread / 2
+            current_bid = mid - current_spread / 2
+            if 0 < current_bid < current_ask < 1:
+                current_half_logit = (logit(current_ask) - logit(current_bid)) / 2
+                return max(current_half_logit, self.MIN_SPREAD_LOGIT + depth_premium)
 
-        return min(recommended, 0.20)  # cap at 20%
+        return self.MIN_SPREAD_LOGIT + depth_premium
 
     def _compute_confidence(self, orderbook: Orderbook) -> float:
         """
@@ -172,6 +195,6 @@ class FairValueEngine:
 
         # Spread component: 0-0.5 (tighter = better, saturates at 1%)
         spread = orderbook.spread_percent or 100.0
-        spread_score = max(0, 1.0 - spread / 10.0) * 0.5  # 10% spread → 0 score
+        spread_score = max(0, 1.0 - spread / 10.0) * 0.5
 
         return depth_score + spread_score
