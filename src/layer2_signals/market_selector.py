@@ -68,7 +68,7 @@ class MarketSelector:
         markets = self.fetcher.get_high_volume_markets(
             min_volume_24h=self.config.mm_min_volume_24h,
             min_liquidity=self.config.mm_min_liquidity,
-            limit=50,
+            limit=200,
         )
 
         logger.info(f"Scanned {len(markets)} markets from Gamma API")
@@ -96,12 +96,16 @@ class MarketSelector:
 
     def _evaluate(self, market: Market) -> Optional[MarketCandidate]:
         """Evaluate a single market. Returns MarketCandidate if it passes filters."""
+        name = market.question[:50]
+
         if not market.token_ids:
+            logger.debug(f"SKIP {name} | no token_ids")
             return None
 
         # Filter: price in 0.10-0.90
         yes_price = market.best_yes_price
         if yes_price < 0.10 or yes_price > 0.90:
+            logger.debug(f"SKIP {name} | price={yes_price:.4f} outside 0.10-0.90")
             return None
 
         # Filter: expiry > 24h
@@ -110,16 +114,19 @@ class MarketSelector:
             end = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)
             hours_until_expiry = (end - now).total_seconds() / 3600
             if hours_until_expiry < 24:
+                logger.debug(f"SKIP {name} | expiry={hours_until_expiry:.1f}h < 24h")
                 return None
 
         # Fetch orderbook for YES token
         token_id = market.token_ids[0]
         orderbook = self.analyzer.get_orderbook(token_id)
         if orderbook is None or orderbook.midpoint is None:
+            logger.debug(f"SKIP {name} | no orderbook or midpoint")
             return None
 
         spread = orderbook.spread
         if spread is None:
+            logger.debug(f"SKIP {name} | no spread")
             return None
 
         midpoint = orderbook.midpoint
@@ -127,6 +134,10 @@ class MarketSelector:
 
         # Filter: spread in [min_spread, max_spread]
         if spread_pct < self.config.mm_min_spread or spread_pct > self.config.mm_max_spread:
+            logger.debug(
+                f"SKIP {name} | spread={spread_pct:.2%} outside "
+                f"[{self.config.mm_min_spread:.0%}-{self.config.mm_max_spread:.0%}]"
+            )
             return None
 
         bid_depth = orderbook.total_bid_depth(levels=5)
