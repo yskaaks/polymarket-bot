@@ -270,7 +270,10 @@ class TradingClient:
             Last trade price or None
         """
         try:
-            return self.clob.get_last_trade_price(token_id)
+            result = self.clob.get_last_trade_price(token_id)
+            if isinstance(result, dict):
+                return float(result["price"])
+            return float(result)
         except Exception as e:
             print(f"Error fetching last trade: {e}")
             return None
