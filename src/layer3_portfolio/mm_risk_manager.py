@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from config.settings import get_config
-from src.utils import kelly_criterion
 
 logger = logging.getLogger(__name__)
 
@@ -147,8 +146,11 @@ class MMRiskManager:
 
     def __init__(self, inventory: InventoryTracker):
         self.inventory = inventory
-        self.config = get_config()
         self._circuit_breaker_triggered = False
+
+    @property
+    def config(self):
+        return get_config()
 
     def should_quote(self, token_id: str) -> RiskCheckResult:
         """Check if we should be quoting this token at all."""
@@ -204,12 +206,14 @@ class MMRiskManager:
         if not self.should_quote(token_id).allowed:
             return 0.0
 
-        # 1/4 Kelly sizing
-        win_prob = 0.5  # market-making assumes ~50/50
-        win_amount = spread / 2
-        loss_amount = fair_value  # worst case: adverse selection
-        kelly = kelly_criterion(win_prob, win_amount, loss_amount)
-        kelly_size = kelly * self.config.mm_capital * 0.25  # quarter Kelly
+        # Size based on spread edge and capital allocation
+        # Wider spread → more edge → can size larger
+        # Allocate proportionally to spread/max_spread, capped at 1/max_markets of capital
+        if spread <= 0:
+            return 0.0
+        spread_ratio = min(spread / 0.10, 1.0)  # normalize: 10% spread → full allocation
+        per_market_capital = self.config.mm_capital / max(self.config.mm_max_markets, 1)
+        base_size = spread_ratio * per_market_capital * 0.05  # 5% of per-market allocation
 
         # Cap by per-market position limit headroom
         current_exposure = self.inventory.get_net_exposure(token_id)
@@ -225,12 +229,12 @@ class MMRiskManager:
         # Cap by 20% of visible book depth (don't be the book)
         depth_cap = book_depth * 0.20 if book_depth > 0 else config_cap
 
-        size = min(kelly_size, position_headroom, total_headroom, config_cap, depth_cap)
+        size = min(base_size, position_headroom, total_headroom, config_cap, depth_cap)
         size = max(0, size)
 
         if size > 0:
             logger.debug(
-                f"Size calc for {token_id[:8]}...: kelly=${kelly_size:.2f} "
+                f"Size calc for {token_id[:8]}...: base=${base_size:.2f} "
                 f"pos_room=${position_headroom:.2f} total_room=${total_headroom:.2f} "
                 f"depth_cap=${depth_cap:.2f} → ${size:.2f}"
             )
