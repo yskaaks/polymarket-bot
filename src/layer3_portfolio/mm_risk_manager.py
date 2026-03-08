@@ -197,6 +197,7 @@ class MMRiskManager:
         fair_value: float,
         spread: float,
         book_depth: float,
+        order_min_size: float = 5.0,
     ) -> float:
         """
         Compute order size respecting all limits.
@@ -231,6 +232,21 @@ class MMRiskManager:
 
         size = min(base_size, position_headroom, total_headroom, config_cap, depth_cap)
         size = max(0, size)
+
+        # Polymarket enforces a per-market minimum order size
+        if 0 < size < order_min_size:
+            logger.debug(
+                f"Size {size:.2f} below Polymarket minimum ({order_min_size}), "
+                f"bumping up for {token_id[:8]}..."
+            )
+            size = order_min_size
+
+        # Re-check caps after bump — if min size exceeds limits, skip entirely
+        if size > position_headroom or size > total_headroom:
+            logger.debug(
+                f"Min size {order_min_size} exceeds headroom for {token_id[:8]}..., skipping"
+            )
+            return 0.0
 
         if size > 0:
             logger.debug(

@@ -34,6 +34,7 @@ class Market:
     active: bool
     closed: bool
     category: str
+    order_min_size: float = 5.0
     
     @property
     def best_yes_price(self) -> float:
@@ -143,7 +144,8 @@ class MarketFetcher:
             end_date=end_date,
             active=data.get("active", False),
             closed=data.get("closed", False),
-            category=data.get("category", "")
+            category=data.get("category", ""),
+            order_min_size=float(data.get("orderMinSize") or data.get("min_order_size") or 5)
         )
     
     def get_all_markets(

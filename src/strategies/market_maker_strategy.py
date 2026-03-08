@@ -58,7 +58,7 @@ class MarketMakerStrategy:
         self.selector = MarketSelector(self.fetcher, self.analyzer)
         self.inventory = InventoryTracker()
         self.risk = MMRiskManager(self.inventory)
-        self.quotes = QuoteManager(self.trading)
+        self.quotes = QuoteManager(self.trading, self.inventory)
         self.notifier = get_notifier()
 
         # WebSocket feed
@@ -251,6 +251,7 @@ class MarketMakerStrategy:
             fair_value=estimate.fair_value,
             spread=ask_price - bid_price,
             book_depth=book_depth,
+            order_min_size=candidate.market.order_min_size,
         )
 
         if size <= 0:

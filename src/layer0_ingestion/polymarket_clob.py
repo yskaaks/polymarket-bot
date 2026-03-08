@@ -8,7 +8,7 @@ Uses the official py-clob-client under the hood.
 import sys
 from typing import Optional
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds
+from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
 
 sys.path.insert(0, str(__file__).rsplit("src", 1)[0])
 from config.settings import Config, get_config
@@ -78,7 +78,12 @@ class PolymarketClient:
                 self._api_creds = self.clob.create_or_derive_api_creds()
                 self.clob.set_api_creds(self._api_creds)
                 self._is_authenticated = True
-            
+
+                # Force CLOB to refresh its cached balance/allowance from chain
+                self.clob.update_balance_allowance(
+                    BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=-1)
+                )
+
             return True
         except Exception as e:
             print(f"Connection error: {e}")
