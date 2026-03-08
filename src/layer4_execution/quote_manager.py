@@ -12,6 +12,7 @@ from typing import Optional
 
 from config.settings import get_config
 from src.layer4_execution.trading import TradingClient, OrderResult
+from src.layer3_portfolio.mm_risk_manager import InventoryTracker
 from src.utils import round_price, round_size, logit
 
 logger = logging.getLogger(__name__)
@@ -53,9 +54,10 @@ class QuoteManager:
     FV_REQUOTE_THRESHOLD_LOGIT: float = 0.08  # requote if FV moved >0.08 in logit space
     MAX_QUOTE_AGE: float = 30.0  # requote after 30 seconds (reduced for WS-driven mode)
 
-    def __init__(self, trading_client: TradingClient):
+    def __init__(self, trading_client: TradingClient, inventory: InventoryTracker):
         self.trading = trading_client
         self.config = get_config()
+        self.inventory = inventory
         self._quotes: dict[str, ActiveQuote] = {}
 
     def place_quote(
@@ -90,12 +92,27 @@ class QuoteManager:
             logger.warning(f"Invalid quote {token_id[:8]}...: bid={bid:.4f} >= ask={ask:.4f}")
             return False
 
+        # Only place SELL if we actually hold tokens to sell
+        position = self.inventory.get_position(token_id)
+        has_inventory = position.net_quantity > 0
+        sell_size = min(size, position.net_quantity) if has_inventory else 0
+
+        logger.info(
+            f"Placing quote {token_id[:8]}...: "
+            f"BUY {size:.1f}@{bid:.4f}"
+            f"{f' / SELL {sell_size:.1f}@{ask:.4f}' if sell_size > 0 else ' / SELL skipped (no inventory)'}"
+            f" (fv={fair_value:.4f})"
+        )
+
         buy_result = self.trading.place_limit_order(
             token_id=token_id, side="BUY", price=bid, size=size
         )
-        sell_result = self.trading.place_limit_order(
-            token_id=token_id, side="SELL", price=ask, size=size
-        )
+
+        sell_result = None
+        if sell_size > 0:
+            sell_result = self.trading.place_limit_order(
+                token_id=token_id, side="SELL", price=ask, size=round_size(sell_size)
+            )
 
         now = time.time()
         quote = ActiveQuote(
@@ -106,27 +123,25 @@ class QuoteManager:
             sell_price=ask,
             size=size,
             buy_order_id=buy_result.order_id if buy_result.success else None,
-            sell_order_id=sell_result.order_id if sell_result.success else None,
+            sell_order_id=sell_result.order_id if sell_result and sell_result.success else None,
             placed_at=now,
         )
         self._quotes[token_id] = quote
 
-        success = buy_result.success and sell_result.success
-        if success:
-            logger.info(
-                f"Quote placed {token_id[:8]}...: "
-                f"BUY {size:.1f}@{bid:.4f} / SELL {size:.1f}@{ask:.4f} "
-                f"(fv={fair_value:.4f} spread={ask - bid:.4f})"
-            )
+        buy_ok = buy_result.success
+        sell_ok = sell_result.success if sell_result else True  # skipped = ok
+
+        if buy_ok and sell_ok:
+            logger.info(f"Quote active {token_id[:8]}...")
         else:
             errors = []
-            if not buy_result.success:
+            if not buy_ok:
                 errors.append(f"buy: {buy_result.error}")
-            if not sell_result.success:
+            if sell_result and not sell_ok:
                 errors.append(f"sell: {sell_result.error}")
             logger.warning(f"Quote partially failed {token_id[:8]}...: {', '.join(errors)}")
 
-        return success
+        return buy_ok and sell_ok
 
     def needs_requote(self, token_id: str, current_fv: float) -> bool:
         """
@@ -165,7 +180,12 @@ class QuoteManager:
         if not self._quotes:
             return []
 
-        open_orders = self.trading.get_open_orders()
+        try:
+            open_orders = self.trading.get_open_orders()
+        except Exception as e:
+            logger.warning(f"Failed to fetch open orders, skipping fill detection: {e}")
+            return []
+
         open_ids = set()
         for order in open_orders:
             oid = order.get("id") or order.get("orderID") or order.get("order_id")

@@ -224,23 +224,23 @@ class TradingClient:
     def get_open_orders(self, market: Optional[str] = None) -> list[dict]:
         """
         Get all open orders.
-        
+
         Args:
             market: Optional market filter
-        
+
         Returns:
             List of open order objects
+
+        Raises:
+            Exception on API/network errors — callers must handle this
+            to avoid false fill detection.
         """
-        try:
-            params = OpenOrderParams()
-            if market:
-                params.market = market
-            
-            orders = self.clob.get_orders(params)
-            return orders if orders else []
-        except Exception as e:
-            print(f"Error fetching orders: {e}")
-            return []
+        params = OpenOrderParams()
+        if market:
+            params.market = market
+
+        orders = self.clob.get_orders(params)
+        return orders if orders else []
     
     def get_trades(self, limit: int = 100) -> list[dict]:
         """

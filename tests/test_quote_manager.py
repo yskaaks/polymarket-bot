@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 from src.layer4_execution.quote_manager import QuoteManager, ActiveQuote, FillEvent
 from src.layer4_execution.trading import OrderResult
+from src.layer3_portfolio.mm_risk_manager import InventoryTracker, Fill
 
 
 @pytest.fixture(autouse=True)
@@ -41,14 +42,37 @@ def mock_trading():
 
 @pytest.fixture
 def qm(mock_trading):
-    return QuoteManager(mock_trading)
+    return QuoteManager(mock_trading, InventoryTracker())
 
 
 class TestQuotePlacement:
     """Quote placement logic."""
 
-    def test_place_quote_calls_both_sides(self, qm, mock_trading):
-        """Places both a BUY and SELL limit order."""
+    def test_place_quote_buy_only_no_inventory(self, qm, mock_trading):
+        """With no inventory, only BUY is placed (SELL skipped)."""
+        success = qm.place_quote(
+            token_id="token_a",
+            fair_value=0.50,
+            bid_price=0.47,
+            ask_price=0.53,
+            size=10.0,
+        )
+        assert success
+        assert mock_trading.place_limit_order.call_count == 1
+
+        buy_call = mock_trading.place_limit_order.call_args_list[0]
+        assert buy_call.kwargs["side"] == "BUY"
+        assert buy_call.kwargs["price"] == pytest.approx(0.47, abs=0.005)
+
+    def test_place_quote_both_sides_with_inventory(self, mock_trading):
+        """With inventory, both BUY and SELL are placed."""
+        inventory = InventoryTracker()
+        inventory.record_fill(Fill(
+            token_id="token_a", side="BUY", price=0.50, size=20.0,
+            order_id="x", timestamp=0.0
+        ))
+        qm = QuoteManager(mock_trading, inventory)
+
         success = qm.place_quote(
             token_id="token_a",
             fair_value=0.50,
@@ -59,15 +83,10 @@ class TestQuotePlacement:
         assert success
         assert mock_trading.place_limit_order.call_count == 2
 
-        # Check BUY call
         buy_call = mock_trading.place_limit_order.call_args_list[0]
         assert buy_call.kwargs["side"] == "BUY"
-        assert buy_call.kwargs["price"] == pytest.approx(0.47, abs=0.005)
-
-        # Check SELL call
         sell_call = mock_trading.place_limit_order.call_args_list[1]
         assert sell_call.kwargs["side"] == "SELL"
-        assert sell_call.kwargs["price"] == pytest.approx(0.53, abs=0.005)
 
     def test_place_quote_tracks_active(self, qm):
         """Active quote is tracked after placement."""
@@ -101,8 +120,15 @@ class TestQuotePlacement:
         success = qm.place_quote("token_a", 0.50, 0.47, 0.53, 0.01)
         assert not success
 
-    def test_partial_failure(self, qm, mock_trading):
+    def test_partial_failure_with_inventory(self, mock_trading):
         """One side fails → quote still tracked (partial)."""
+        inventory = InventoryTracker()
+        inventory.record_fill(Fill(
+            token_id="token_a", side="BUY", price=0.50, size=20.0,
+            order_id="x", timestamp=0.0
+        ))
+        qm = QuoteManager(mock_trading, inventory)
+
         mock_trading.place_limit_order.side_effect = [
             OrderResult(success=True, order_id="BUY_1"),
             OrderResult(success=False, error="insufficient balance"),
@@ -166,51 +192,58 @@ class TestRequoteLogic:
 class TestFillDetection:
     """Detecting when quotes get filled."""
 
-    def test_no_fills_when_orders_open(self, qm, mock_trading):
+    @pytest.fixture
+    def qm_with_inventory(self, mock_trading):
+        """QuoteManager with inventory so both BUY and SELL get placed."""
+        inventory = InventoryTracker()
+        inventory.record_fill(Fill(
+            token_id="token_a", side="BUY", price=0.50, size=100.0,
+            order_id="x", timestamp=0.0
+        ))
+        return QuoteManager(mock_trading, inventory)
+
+    def test_no_fills_when_orders_open(self, qm_with_inventory, mock_trading):
         """All orders still open → no fills."""
         mock_trading.place_limit_order.side_effect = [
             OrderResult(success=True, order_id="BUY_1"),
             OrderResult(success=True, order_id="SELL_1"),
         ]
-        qm.place_quote("token_a", 0.50, 0.47, 0.53, 10.0)
+        qm_with_inventory.place_quote("token_a", 0.50, 0.47, 0.53, 10.0)
 
-        # Simulate both orders still open
         mock_trading.get_open_orders.return_value = [
             {"id": "BUY_1"},
             {"id": "SELL_1"},
         ]
-        fills = qm.detect_fills()
+        fills = qm_with_inventory.detect_fills()
         assert len(fills) == 0
 
-    def test_detects_buy_fill(self, qm, mock_trading):
+    def test_detects_buy_fill(self, qm_with_inventory, mock_trading):
         """Buy order disappears from open orders → fill detected."""
         mock_trading.place_limit_order.side_effect = [
             OrderResult(success=True, order_id="BUY_1"),
             OrderResult(success=True, order_id="SELL_1"),
         ]
-        qm.place_quote("token_a", 0.50, 0.47, 0.53, 10.0)
+        qm_with_inventory.place_quote("token_a", 0.50, 0.47, 0.53, 10.0)
 
-        # Only sell order remains open
         mock_trading.get_open_orders.return_value = [
             {"id": "SELL_1"},
         ]
-        fills = qm.detect_fills()
+        fills = qm_with_inventory.detect_fills()
         assert len(fills) == 1
         assert fills[0].side == "BUY"
         assert fills[0].price == pytest.approx(0.47, abs=0.005)
         assert fills[0].order_id == "BUY_1"
 
-    def test_detects_both_sides_filled(self, qm, mock_trading):
+    def test_detects_both_sides_filled(self, qm_with_inventory, mock_trading):
         """Both sides filled → two fill events."""
         mock_trading.place_limit_order.side_effect = [
             OrderResult(success=True, order_id="BUY_1"),
             OrderResult(success=True, order_id="SELL_1"),
         ]
-        qm.place_quote("token_a", 0.50, 0.47, 0.53, 10.0)
+        qm_with_inventory.place_quote("token_a", 0.50, 0.47, 0.53, 10.0)
 
-        # No orders open
         mock_trading.get_open_orders.return_value = []
-        fills = qm.detect_fills()
+        fills = qm_with_inventory.detect_fills()
         assert len(fills) == 2
         sides = {f.side for f in fills}
         assert sides == {"BUY", "SELL"}

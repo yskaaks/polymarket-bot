@@ -69,7 +69,7 @@ class TestFullPipeline:
         inventory = InventoryTracker()
         risk = MMRiskManager(inventory)
         mock_trading = make_mock_trading()
-        quotes = QuoteManager(mock_trading)
+        quotes = QuoteManager(mock_trading, inventory)
 
         book = clob_book_to_orderbook(CLOB_BOOK_WIDE_SPREAD)
         token_id = book.token_id
@@ -125,7 +125,7 @@ class TestFullPipeline:
         inventory = InventoryTracker()
         risk = MMRiskManager(inventory)
         mock_trading = make_mock_trading()
-        quotes = QuoteManager(mock_trading)
+        quotes = QuoteManager(mock_trading, inventory)
 
         book = clob_book_to_orderbook(CLOB_BOOK_TIGHT_SPREAD)
         token_id = book.token_id
@@ -161,7 +161,7 @@ class TestFullPipeline:
         inventory = InventoryTracker()
         risk = MMRiskManager(inventory)
         mock_trading = make_mock_trading()
-        quotes = QuoteManager(mock_trading)
+        quotes = QuoteManager(mock_trading, inventory)
 
         book_thin = clob_book_to_orderbook(CLOB_BOOK_THIN)
         book_deep = clob_book_to_orderbook(CLOB_BOOK_TIGHT_SPREAD)
@@ -194,7 +194,7 @@ class TestFullPipeline:
         inventory = InventoryTracker()
         risk = MMRiskManager(inventory)
         mock_trading = make_mock_trading()
-        quotes = QuoteManager(mock_trading)
+        quotes = QuoteManager(mock_trading, inventory)
 
         book = clob_book_to_orderbook(CLOB_BOOK_WIDE_SPREAD)
         token_id = book.token_id
@@ -232,7 +232,7 @@ class TestFullPipeline:
         inventory = InventoryTracker()
         risk = MMRiskManager(inventory)
         mock_trading = make_mock_trading()
-        quotes = QuoteManager(mock_trading)
+        quotes = QuoteManager(mock_trading, inventory)
 
         book = clob_book_to_orderbook(CLOB_BOOK_WIDE_SPREAD)
         token_id = book.token_id
@@ -263,7 +263,7 @@ class TestFullPipeline:
         inventory = InventoryTracker()
         risk = MMRiskManager(inventory)
         mock_trading = make_mock_trading()
-        quotes = QuoteManager(mock_trading)
+        quotes = QuoteManager(mock_trading, inventory)
 
         book = clob_book_to_orderbook(CLOB_BOOK_WIDE_SPREAD)
         token_id = book.token_id
@@ -320,7 +320,7 @@ class TestFullPipeline:
         inventory = InventoryTracker()
         risk = MMRiskManager(inventory)
         mock_trading = make_mock_trading()
-        quotes = QuoteManager(mock_trading)
+        quotes = QuoteManager(mock_trading, inventory)
 
         book_a = clob_book_to_orderbook(CLOB_BOOK_WIDE_SPREAD)
         book_b = clob_book_to_orderbook(CLOB_BOOK_TIGHT_SPREAD)
