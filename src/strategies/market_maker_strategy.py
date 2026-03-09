@@ -16,6 +16,8 @@ from config.settings import get_config
 from src.layer0_ingestion.polymarket_clob import PolymarketClient
 from src.layer0_ingestion.polymarket_gamma import MarketFetcher
 from src.layer2_signals.fair_value import FairValueEngine
+from src.layer2_signals.crypto_price_signal import CryptoPriceSignal
+from src.layer2_signals.kalshi_signal import KalshiSignal
 from src.layer2_signals.market_selector import MarketSelector, MarketCandidate
 from src.layer3_portfolio.mm_risk_manager import (
     InventoryTracker, MMRiskManager, Fill,
@@ -61,6 +63,12 @@ class MarketMakerStrategy:
         self.quotes = QuoteManager(self.trading, self.inventory)
         self.notifier = get_notifier()
 
+        # External signal providers
+        self.crypto_signal = CryptoPriceSignal()
+        self.kalshi_signal = KalshiSignal()
+        self.fv_engine.register_signal(self.crypto_signal)
+        self.fv_engine.register_signal(self.kalshi_signal)
+
         # WebSocket feed
         self._ws_feed = WebSocketFeed()
         self._ws_feed.on_price(self._on_price_update)
@@ -70,6 +78,7 @@ class MarketMakerStrategy:
         # State
         self._candidates: list[MarketCandidate] = []
         self._candidate_by_token: dict[str, MarketCandidate] = {}
+        self._fee_rate_cache: dict[str, int] = {}  # token_id → fee_rate_bps
         self._subscribed_tokens: set[str] = set()
         self._last_universe_refresh: float = 0.0
         self._last_fill_detect: float = 0.0
@@ -119,6 +128,10 @@ class MarketMakerStrategy:
             f"Markets: {self.config.mm_max_markets} | "
             f"Capital: ${self.config.mm_capital:,.0f}"
         )
+
+        # Start external signal feeds
+        self.crypto_signal.start()
+        self.kalshi_signal.start()
 
         # Initial universe scan (before WS starts)
         self._refresh_universe()
@@ -215,8 +228,17 @@ class MarketMakerStrategy:
         # Get last trade price for VWAP blend
         last_trade = self.trading.get_last_trade_price(token_id)
 
+        # Fetch fee rate for this token (0 for most markets), cached
+        if token_id not in self._fee_rate_cache:
+            try:
+                self._fee_rate_cache[token_id] = self.pm_client.clob.get_fee_rate_bps(token_id)
+            except Exception as e:
+                logger.warning(f"Failed to get fee rate for {token_id[:8]}...: {e}, assuming 0")
+                self._fee_rate_cache[token_id] = 0
+        fee_rate_bps = self._fee_rate_cache[token_id]
+
         # Estimate fair value (all math in logit space)
-        estimate = self.fv_engine.estimate(token_id, orderbook, last_trade)
+        estimate = self.fv_engine.estimate(token_id, orderbook, last_trade, fee_rate_bps=fee_rate_bps)
         if estimate is None:
             return
 
@@ -244,7 +266,7 @@ class MarketMakerStrategy:
             bid_price = estimate.bid_price
             ask_price = estimate.ask_price
 
-        # Compute order size
+        # Compute order size (fee-aware: uses net edge for sizing)
         book_depth = orderbook.total_bid_depth(5) + orderbook.total_ask_depth(5)
         size = self.risk.compute_order_size(
             token_id=token_id,
@@ -252,6 +274,7 @@ class MarketMakerStrategy:
             spread=ask_price - bid_price,
             book_depth=book_depth,
             order_min_size=candidate.market.order_min_size,
+            fee_rate_bps=fee_rate_bps,
         )
 
         if size <= 0:
@@ -267,7 +290,7 @@ class MarketMakerStrategy:
         )
 
     def _refresh_universe(self) -> None:
-        """Scan for new market candidates and update WS subscriptions."""
+        """Scan for new market candidates and update WS + signal subscriptions."""
         try:
             old_tokens = set(self._candidate_by_token.keys())
             self._candidates = self.selector.scan()
@@ -280,6 +303,32 @@ class MarketMakerStrategy:
             for token_id in old_tokens - new_tokens:
                 logger.info(f"Market {token_id[:8]}... dropped from universe, cancelling quote")
                 self.quotes.cancel_quote(token_id)
+                self.crypto_signal.unregister_market(token_id)
+                self.kalshi_signal.unregister_market(token_id)
+
+            # Register new markets with signal providers
+            for token_id in new_tokens - old_tokens:
+                candidate = self._candidate_by_token[token_id]
+                question = candidate.market.question
+                expiry = candidate.market.end_date
+
+                crypto_matched = self.crypto_signal.register_market(
+                    token_id, question, expiry
+                )
+                kalshi_matched = self.kalshi_signal.register_market(
+                    token_id, question
+                )
+
+                if crypto_matched or kalshi_matched:
+                    signals = []
+                    if crypto_matched:
+                        signals.append("crypto")
+                    if kalshi_matched:
+                        signals.append("kalshi")
+                    logger.info(
+                        f"Signal sources for {token_id[:8]}...: "
+                        f"{', '.join(signals)} | {question[:50]}"
+                    )
 
             # Update WS subscriptions
             self._update_ws_subscriptions(new_tokens)
@@ -300,6 +349,7 @@ class MarketMakerStrategy:
                 size=fill_event.size,
                 timestamp=fill_event.timestamp,
                 order_id=fill_event.order_id,
+                fee_rate_bps=self._fee_rate_cache.get(fill_event.token_id, 0),
             )
             self.inventory.record_fill(fill)
 
@@ -391,6 +441,7 @@ class MarketMakerStrategy:
         logger.info(f"  Spread range:    {self.config.mm_min_spread:.0%}-{self.config.mm_max_spread:.0%}")
         logger.info(f"  Capital:         ${self.config.mm_capital:,.0f}")
         logger.info(f"  Stop-loss/mkt:   ${self.config.mm_stop_loss_per_market:.0f}")
+        logger.info(f"  Signals:         Binance crypto prices + Kalshi cross-exchange")
         logger.info("=" * 60)
 
     def _log_status(self) -> None:
@@ -402,10 +453,14 @@ class MarketMakerStrategy:
         )
         active_quotes = self.quotes.num_active_quotes
 
+        fee_markets = sum(1 for bps in self._fee_rate_cache.values() if bps > 0)
         logger.info(
             f"[Status] Markets: {len(self._candidates)} | "
             f"Active quotes: {active_quotes} | "
             f"WS subs: {len(self._subscribed_tokens)} | "
+            f"Signals: crypto={len(self.crypto_signal._mappings)} "
+            f"kalshi={self.kalshi_signal.num_matches} | "
+            f"Fee markets: {fee_markets}/{len(self._fee_rate_cache)} | "
             f"Exposure: ${total_exposure:.0f} | "
             f"Realized PnL: ${total_pnl:.2f}"
         )
@@ -422,6 +477,8 @@ class MarketMakerStrategy:
         logger.info("Cancelling all quotes...")
         self.quotes.cancel_all_quotes()
         self._ws_feed._running = False
+        self.crypto_signal.stop()
+        self.kalshi_signal.stop()
         self.fetcher.close()
         self.notifier.send("<b>Market Maker Stopped</b>")
         logger.info("Market Maker shutdown complete")

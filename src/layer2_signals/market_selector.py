@@ -13,6 +13,7 @@ from typing import Optional
 from config.settings import get_config
 from src.layer0_ingestion.polymarket_gamma import MarketFetcher, Market
 from src.orderbook import Orderbook, OrderbookAnalyzer
+from src.utils import round_trip_fee
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,8 @@ class MarketCandidate:
     midpoint: float
     bid_depth: float
     ask_depth: float
+    fee_rate_bps: int = 0
+    net_spread: float = 0.0  # spread minus round-trip fees
 
     @property
     def token_id(self) -> str:
@@ -87,8 +90,10 @@ class MarketSelector:
             f"(from {len(markets)} markets)"
         )
         for c in result:
+            fee_str = f" fee={c.fee_rate_bps}bps" if c.fee_rate_bps > 0 else ""
             logger.info(
                 f"  {c.market.question[:60]} | spread={c.spread:.2%} "
+                f"net_spread={c.net_spread:.4f}{fee_str} "
                 f"mid={c.midpoint:.4f} score={c.score:.2f}"
             )
 
@@ -140,11 +145,29 @@ class MarketSelector:
             )
             return None
 
+        # Fetch fee rate and compute net spread
+        try:
+            fee_rate_bps = self.analyzer.clob_client.get_fee_rate_bps(token_id)
+        except Exception:
+            fee_rate_bps = 0
+
+        best_bid = midpoint - spread / 2
+        best_ask = midpoint + spread / 2
+        rt_fee = round_trip_fee(best_bid, best_ask, fee_rate_bps)
+        net_spread = spread - rt_fee
+
+        if fee_rate_bps > 0 and net_spread < 0:
+            logger.debug(
+                f"SKIP {name} | fees ({rt_fee:.4f}) exceed spread ({spread:.4f})"
+            )
+            return None
+
         bid_depth = orderbook.total_bid_depth(levels=5)
         ask_depth = orderbook.total_ask_depth(levels=5)
 
-        # Score: weighted combination
-        score = self._score(spread_pct, market.volume_24h, bid_depth + ask_depth, yes_price)
+        # Score using net spread (after fees) instead of raw spread
+        net_spread_pct = net_spread / midpoint if midpoint > 0 else 0
+        score = self._score(net_spread_pct, market.volume_24h, bid_depth + ask_depth, yes_price)
 
         return MarketCandidate(
             market=market,
@@ -154,6 +177,8 @@ class MarketSelector:
             midpoint=midpoint,
             bid_depth=bid_depth,
             ask_depth=ask_depth,
+            fee_rate_bps=fee_rate_bps,
+            net_spread=net_spread,
         )
 
     def _score(

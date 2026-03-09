@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from config.settings import get_config
+from src.utils import polymarket_taker_fee
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ class Fill:
     size: float
     timestamp: float
     order_id: str = ""
+    fee_rate_bps: int = 0
 
 
 @dataclass
@@ -53,24 +55,29 @@ class InventoryTracker:
         pos = self.get_position(fill.token_id)
         pos.fills.append(fill)
 
+        fee = polymarket_taker_fee(fill.price, fill.fee_rate_bps)
+
         if fill.side == "BUY":
-            # Update average entry for buys
+            # Effective cost includes fee: we pay price + fee per share
+            effective_price = fill.price + fee
             old_cost = pos.avg_entry_price * max(pos.net_quantity, 0)
-            new_cost = fill.price * fill.size
+            new_cost = effective_price * fill.size
             pos.net_quantity += fill.size
-            pos.total_bought += fill.size * fill.price
+            pos.total_bought += fill.size * effective_price
             if pos.net_quantity > 0:
                 pos.avg_entry_price = (old_cost + new_cost) / pos.net_quantity
         elif fill.side == "SELL":
-            # Realize P&L on sells if we had a long position
+            # Effective proceeds reduced by fee: we receive price - fee per share
+            effective_price = fill.price - fee
             if pos.net_quantity > 0:
                 realized_qty = min(fill.size, pos.net_quantity)
-                pos.realized_pnl += realized_qty * (fill.price - pos.avg_entry_price)
+                pos.realized_pnl += realized_qty * (effective_price - pos.avg_entry_price)
             pos.net_quantity -= fill.size
-            pos.total_sold += fill.size * fill.price
+            pos.total_sold += fill.size * effective_price
 
+        fee_str = f" fee={fee:.4f}/sh" if fill.fee_rate_bps > 0 else ""
         logger.info(
-            f"Fill recorded: {fill.side} {fill.size:.2f} @ {fill.price:.4f} "
+            f"Fill recorded: {fill.side} {fill.size:.2f} @ {fill.price:.4f}{fee_str} "
             f"token={fill.token_id[:8]}... | net={pos.net_quantity:.2f} "
             f"realized_pnl=${pos.realized_pnl:.2f}"
         )
@@ -198,21 +205,34 @@ class MMRiskManager:
         spread: float,
         book_depth: float,
         order_min_size: float = 5.0,
+        fee_rate_bps: int = 0,
     ) -> float:
         """
         Compute order size respecting all limits.
         Uses 1/4 Kelly, capped by position limits, total exposure headroom,
         config max_order_size, and 20% of visible book depth.
+
+        Uses net edge (spread minus round-trip fees) for sizing.
         """
         if not self.should_quote(token_id).allowed:
             return 0.0
 
-        # Size based on spread edge and capital allocation
-        # Wider spread → more edge → can size larger
-        # Allocate proportionally to spread/max_spread, capped at 1/max_markets of capital
-        if spread <= 0:
+        # Compute net edge after fees
+        from src.utils import round_trip_fee
+        rt_fee = round_trip_fee(fair_value - spread / 2, fair_value + spread / 2, fee_rate_bps)
+        net_edge = spread - rt_fee
+
+        if net_edge <= 0:
+            if fee_rate_bps > 0:
+                logger.debug(
+                    f"Spread {spread:.4f} doesn't cover fees {rt_fee:.4f} "
+                    f"for {token_id[:8]}..., skipping"
+                )
             return 0.0
-        spread_ratio = min(spread / 0.10, 1.0)  # normalize: 10% spread → full allocation
+
+        # Size based on net edge and capital allocation
+        # Wider net edge → more profit → can size larger
+        spread_ratio = min(net_edge / 0.10, 1.0)  # normalize: 10% net edge → full allocation
         per_market_capital = self.config.mm_capital / max(self.config.mm_max_markets, 1)
         base_size = spread_ratio * per_market_capital * 0.05  # 5% of per-market allocation
 

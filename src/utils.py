@@ -114,24 +114,20 @@ def round_size(size: float, min_size: float = 0.1) -> float:
     return float(d.quantize(step, rounding=ROUND_DOWN))
 
 
-def calculate_effective_price(side: str, price: float, fee_bps: int = 0) -> float:
+def polymarket_taker_fee(price: float, fee_rate_bps: int) -> float:
     """
-    Calculate effective price after fees.
-    
-    Args:
-        side: "BUY" or "SELL"
-        price: Raw price
-        fee_bps: Fee in basis points (1 bp = 0.01%)
-    
-    Returns:
-        Effective price
+    Polymarket taker fee per share.
+    Formula: p * (1 - p) * (fee_rate_bps / 10000)
+    Parabolic: max at p=0.50, zero at p=0 and p=1.
     """
-    fee_mult = fee_bps / 10000
-    
-    if side == "BUY":
-        return price * (1 + fee_mult)
-    else:
-        return price * (1 - fee_mult)
+    if fee_rate_bps <= 0:
+        return 0.0
+    return price * (1.0 - price) * (fee_rate_bps / 10000)
+
+
+def round_trip_fee(bid_price: float, ask_price: float, fee_rate_bps: int) -> float:
+    """Total fee for a buy+sell round trip."""
+    return polymarket_taker_fee(bid_price, fee_rate_bps) + polymarket_taker_fee(ask_price, fee_rate_bps)
 
 
 def calculate_pnl(entry_price: float, exit_price: float, size: float, side: str) -> float:

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from src.orderbook import Orderbook
-from src.utils import logit, expit, logit_adjust, logit_midpoint, logit_spread
+from src.utils import logit, expit, logit_adjust, logit_midpoint, logit_spread, polymarket_taker_fee, round_trip_fee
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,9 @@ class FairValueEstimate:
     imbalance_adj_logit: float  # adjustment applied in logit space
     vwap_adj_logit: float
     signal_adj_logit: float = 0.0
+    fee_per_share_bid: float = 0.0
+    fee_per_share_ask: float = 0.0
+    net_edge: float = 0.0  # spread minus round-trip fees
 
 
 class SignalProvider(ABC):
@@ -71,11 +74,14 @@ class FairValueEngine:
         self._signals.append(provider)
         logger.info(f"Registered signal provider: {provider.name}")
 
+    MIN_EDGE_ABOVE_FEES: float = 0.002  # require at least 0.2% edge after fees
+
     def estimate(
         self,
         token_id: str,
         orderbook: Orderbook,
         last_trade_price: Optional[float] = None,
+        fee_rate_bps: int = 0,
     ) -> Optional[FairValueEstimate]:
         """
         Estimate fair value for a token.
@@ -84,6 +90,7 @@ class FairValueEngine:
             token_id: CLOB token ID
             orderbook: Current orderbook snapshot
             last_trade_price: Most recent trade price (VWAP proxy)
+            fee_rate_bps: Polymarket taker fee in basis points (0 for most markets)
 
         Returns:
             FairValueEstimate or None if orderbook is insufficient
@@ -123,9 +130,28 @@ class FairValueEngine:
         # 4. Spread in logit space (symmetric in logit = asymmetric in prob)
         half_spread_logit = self._recommend_half_spread_logit(orderbook)
         bid_price, ask_price = logit_spread(fair_value, half_spread_logit)
+
+        # 5. Fee-aware spread widening: ensure spread covers round-trip fees + min edge
+        fee_bid = polymarket_taker_fee(bid_price, fee_rate_bps)
+        fee_ask = polymarket_taker_fee(ask_price, fee_rate_bps)
+        rt_fee = fee_bid + fee_ask
         spread = ask_price - bid_price
 
-        # 5. Confidence
+        if fee_rate_bps > 0 and spread < rt_fee + self.MIN_EDGE_ABOVE_FEES:
+            # Widen symmetrically until spread covers fees + min edge
+            needed_spread = rt_fee + self.MIN_EDGE_ABOVE_FEES
+            widen_each = (needed_spread - spread) / 2
+            bid_price = max(0.01, bid_price - widen_each)
+            ask_price = min(0.99, ask_price + widen_each)
+            spread = ask_price - bid_price
+            # Recompute fees at widened prices
+            fee_bid = polymarket_taker_fee(bid_price, fee_rate_bps)
+            fee_ask = polymarket_taker_fee(ask_price, fee_rate_bps)
+            rt_fee = fee_bid + fee_ask
+
+        net_edge = spread - rt_fee
+
+        # 6. Confidence
         confidence = self._compute_confidence(orderbook)
 
         estimate = FairValueEstimate(
@@ -138,6 +164,9 @@ class FairValueEngine:
             imbalance_adj_logit=imbalance_adj_logit,
             vwap_adj_logit=vwap_adj_logit,
             signal_adj_logit=signal_adj_logit,
+            fee_per_share_bid=fee_bid,
+            fee_per_share_ask=fee_ask,
+            net_edge=net_edge,
         )
 
         logger.debug(
@@ -145,6 +174,7 @@ class FairValueEngine:
             f"imb_logit={imbalance_adj_logit:+.3f} vwap_logit={vwap_adj_logit:+.3f} "
             f"→ fv={fair_value:.4f} bid={bid_price:.4f} ask={ask_price:.4f} "
             f"spread={spread:.4f} conf={confidence:.2f}"
+            + (f" fee_rt={rt_fee:.4f} net_edge={net_edge:.4f}" if fee_rate_bps > 0 else "")
         )
 
         return estimate
