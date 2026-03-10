@@ -34,7 +34,15 @@ class Market:
     active: bool
     closed: bool
     category: str
+    tags: list[str] = None  # tag slugs from events API (e.g. ["crypto", "crypto-prices", "solana"])
+    description: str = ""
+    event_slug: str = ""
+    resolution_source: str = ""
     order_min_size: float = 5.0
+
+    def __post_init__(self):
+        if self.tags is None:
+            self.tags = []
     
     @property
     def best_yes_price(self) -> float:
@@ -145,6 +153,10 @@ class MarketFetcher:
             active=data.get("active", False),
             closed=data.get("closed", False),
             category=data.get("category", ""),
+            tags=data.get("_tags", []),  # injected by _parse_event
+            description=data.get("description", ""),
+            event_slug=data.get("_event_slug", ""),
+            resolution_source=data.get("resolutionSource", ""),
             order_min_size=float(data.get("orderMinSize") or data.get("min_order_size") or 5)
         )
     
@@ -357,6 +369,117 @@ class MarketFetcher:
         
         return markets
     
+    def get_events_by_tag(self, tag_slug: str, limit: int = 100) -> list[Market]:
+        """
+        Fetch markets from events with a specific tag.
+
+        Tags live on the /events endpoint, not /markets. This method
+        queries events by tag_slug and returns the nested markets with
+        tag metadata injected.
+
+        Args:
+            tag_slug: Tag slug (e.g. "crypto-prices", "crypto", "solana")
+            limit: Max events to fetch
+
+        Returns:
+            Markets with tags populated from their parent event
+        """
+        params = {
+            "limit": limit,
+            "active": "true",
+            "closed": "false",
+            "tag_slug": tag_slug,
+            "related_tags": "true",
+        }
+
+        data = self._get("/events", params)
+
+        markets = []
+        events = data if isinstance(data, list) else [data]
+        for event in events:
+            # Extract tags from the event
+            event_tags = []
+            for tag in event.get("tags", []):
+                if isinstance(tag, dict):
+                    event_tags.append(tag.get("slug", ""))
+                elif isinstance(tag, str):
+                    event_tags.append(tag)
+
+            event_slug = event.get("slug", "")
+
+            # Parse each nested market, injecting event metadata
+            for mkt_data in event.get("markets", []):
+                try:
+                    mkt_data["_tags"] = event_tags
+                    mkt_data["_event_slug"] = event_slug
+                    markets.append(self._parse_market(mkt_data))
+                except Exception as e:
+                    print(f"Error parsing event market: {e}")
+                    continue
+
+        return markets
+
+    def get_market_tags(self, market_ids: set[str]) -> dict[str, list[str]]:
+        """
+        Build a map of market_id → tag slugs by scanning events.
+
+        Useful for enriching markets that were fetched from /markets
+        (which doesn't include tags) with tag metadata from /events.
+
+        Args:
+            market_ids: Set of market IDs to look up
+
+        Returns:
+            Dict mapping market_id → list of tag slugs
+        """
+        tag_map: dict[str, list[str]] = {}
+        if not market_ids:
+            return tag_map
+
+        # Fetch events page by page — events contain nested markets
+        offset = 0
+        found = set()
+        for _ in range(20):  # max 20 pages
+            params = {
+                "limit": 100,
+                "offset": offset,
+                "active": "true",
+                "closed": "false",
+                "related_tags": "true",
+            }
+            try:
+                data = self._get("/events", params)
+            except Exception:
+                break
+
+            events = data if isinstance(data, list) else []
+            if not events:
+                break
+
+            for event in events:
+                event_tags = []
+                for tag in event.get("tags", []):
+                    if isinstance(tag, dict):
+                        event_tags.append(tag.get("slug", ""))
+                    elif isinstance(tag, str):
+                        event_tags.append(tag)
+
+                for mkt in event.get("markets", []):
+                    mid = mkt.get("id", "")
+                    if mid in market_ids:
+                        tag_map[mid] = event_tags
+                        found.add(mid)
+
+            # Stop early if we found all
+            if found >= market_ids:
+                break
+
+            offset += len(events)
+            if len(events) < 100:
+                break
+
+        return tag_map
+
     def search_markets(self, query: str, limit: int = 20) -> list[Market]:
         """
         Search markets by question text.

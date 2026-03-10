@@ -306,17 +306,36 @@ class MarketMakerStrategy:
                 self.crypto_signal.unregister_market(token_id)
                 self.kalshi_signal.unregister_market(token_id)
 
+            # Enrich new markets with tags from events API
+            new_market_ids = {
+                self._candidate_by_token[tid].market.id
+                for tid in new_tokens - old_tokens
+            }
+            if new_market_ids:
+                try:
+                    tag_map = self.fetcher.get_market_tags(new_market_ids)
+                    for token_id in new_tokens - old_tokens:
+                        candidate = self._candidate_by_token[token_id]
+                        tags = tag_map.get(candidate.market.id, [])
+                        if tags:
+                            candidate.market.tags = tags
+                except Exception as e:
+                    logger.warning(f"Failed to fetch market tags: {e}")
+
             # Register new markets with signal providers
             for token_id in new_tokens - old_tokens:
                 candidate = self._candidate_by_token[token_id]
-                question = candidate.market.question
-                expiry = candidate.market.end_date
+                market = candidate.market
 
                 crypto_matched = self.crypto_signal.register_market(
-                    token_id, question, expiry
+                    token_id=token_id,
+                    question=market.question,
+                    tags=market.tags,
+                    description=market.description,
+                    expiry=market.end_date,
                 )
                 kalshi_matched = self.kalshi_signal.register_market(
-                    token_id, question
+                    token_id, market.question
                 )
 
                 if crypto_matched or kalshi_matched:
@@ -327,7 +346,8 @@ class MarketMakerStrategy:
                         signals.append("kalshi")
                     logger.info(
                         f"Signal sources for {token_id[:8]}...: "
-                        f"{', '.join(signals)} | {question[:50]}"
+                        f"{', '.join(signals)} "
+                        f"tags={market.tags[:3]} | {market.question[:50]}"
                     )
 
             # Update WS subscriptions
