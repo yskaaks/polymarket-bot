@@ -27,8 +27,10 @@ Chosen over a custom engine because:
 
 ### Directory Structure
 
+Backtesting lives under `src/layer1_research/backtesting/` — the `layer1_research` directory was reserved for exactly this kind of work and is currently empty.
+
 ```
-src/backtesting/
+src/layer1_research/backtesting/
 ├── __init__.py
 ├── config.py                    # BacktestConfig
 ├── runner.py                    # BacktestRunner
@@ -68,6 +70,8 @@ data/
 └── catalog/                     # ParquetDataCatalog output (gitignored)
 ```
 
+**Note on strategy directories:** `src/strategies/` contains live trading strategies (`MarketMakerStrategy`, `UmaArbStrategy`). `src/layer1_research/backtesting/strategies/` contains backtesting strategy classes that extend Nautilus's `Strategy`. These are separate because backtesting strategies use Nautilus's event system while live strategies use the bot's own event loop. The goal is to keep the signal logic portable between them — the `generate_signal()` core can be extracted and shared, but the surrounding lifecycle is different.
+
 ### Data Layer
 
 **Purpose:** Get external historical data into NautilusTrader's `ParquetDataCatalog` format.
@@ -77,7 +81,7 @@ data/
 - `load_trades() -> Iterator[TradeTick]` — trade data as Nautilus tick types
 
 **Implementations:**
-- **`BeckerParquetLoader`** — reads Jon-Becker `prediction-market-analysis` repo Parquet files via DuckDB. Maps columns (`maker`, `taker`, `asset`, `side`, `size`, `price`) to Nautilus `TradeTick`. Builds `BinaryOption` instruments from market metadata.
+- **`BeckerParquetLoader`** — reads Jon-Becker `prediction-market-analysis` repo Parquet files via DuckDB. Maps columns (`maker`, `taker`, `asset`, `side`, `size`, `price`) to Nautilus `TradeTick`. Builds `BinaryOption` instruments from market metadata. Validates expected columns on load and raises `ValueError` with clear messages if schema doesn't match.
 - **`S3Loader`** — downloads Parquet files from S3 bucket, delegates to format-specific parsing.
 - **`CSVLoader`** — reads CSV with configurable column mapping.
 
@@ -85,7 +89,7 @@ data/
 
 **`catalog.py`** — orchestrator: takes a `DataLoader`, runs it, writes output to a `ParquetDataCatalog` directory. One-time ETL step.
 
-**Bar aggregation** — handled by NautilusTrader natively. Load `TradeTick` data and configure aggregation (time-based, volume-based) in backtest config.
+**Bar aggregation** — handled by NautilusTrader natively. Load `TradeTick` data and configure aggregation in backtest config. Initially only time-based bars are supported (`bar_interval` in config). Volume-based and tick-count aggregation can be added later by extending `BacktestConfig`.
 
 ### Strategy Interface
 
@@ -109,7 +113,19 @@ class Signal:
     metadata: dict | None    # strategy-specific context for reporting
 ```
 
-**Reusing existing code:** `SignalProvider` implementations from `src/layer2_signals/` (Kalshi signal, crypto price signal) can be wrapped as helpers that strategies call inside `generate_signal()` — adapted from live-polling to consuming historical data.
+### Adapting Live SignalProviders for Backtesting
+
+The existing `SignalProvider` ABC (`src/layer2_signals/fair_value.py`) returns logit-space adjustments via `get_adjustment(token_id, current_fv) -> float`. This is a different interface from the backtesting `Signal` dataclass. Additionally, live signal providers (`KalshiSignal`, `CryptoPriceSignal`) rely on real-time polling (HTTP, WebSocket) which cannot run during replay.
+
+**Solution: Historical signal data as custom Nautilus data types.**
+
+1. **During ETL** (`scripts/load_data.py`): for strategies that depend on external signals (Kalshi prices, crypto prices), the loader also ingests the corresponding historical data and writes it to the catalog as custom Nautilus `Data` subclasses (e.g., `KalshiPriceData`, `CryptoPriceData`).
+
+2. **During replay**: the backtesting strategy subscribes to these custom data types via `self.subscribe_data()`. When Nautilus delivers the data in timestamp order alongside trade/bar data, the strategy's `on_data()` handler updates an internal state dict of latest external prices.
+
+3. **In `generate_signal()`**: the strategy reads from the internal state dict to compute cross-exchange divergence or other signal logic. The core math (logit adjustments, divergence thresholds) is extracted from the live signal providers into pure functions in `src/utils.py` or a shared module, so both live and backtest code use the same calculations.
+
+This avoids wrapping the live polling-based classes entirely. The signal math is shared; the data delivery mechanism is different (live polling vs Nautilus replay).
 
 ### Fee Model & Position Sizing
 
@@ -117,10 +133,10 @@ class Signal:
 - Formula: `fee = price * (1 - price) * (fee_rate_bps / 10_000)`
 - Max fee at p=0.50, zero at extremes
 - Per-market fee rates (most markets 0 bps, some 20-50 bps)
-- Reuses existing fee math from `src/utils.py`
+- Reuses existing `polymarket_taker_fee()` from `src/utils.py`
 
 **`PositionSizer`** — determines order size given a signal:
-- **Kelly criterion** — reuses `kelly_fraction()` from `src/utils.py`
+- **Kelly criterion** — reuses `kelly_criterion()` from `src/utils.py`
 - **Fixed fractional** — risk fixed % of portfolio per trade
 - Configurable per-backtest run; strategies can override via `Signal.size`
 
@@ -162,7 +178,11 @@ class BacktestConfig:
 
 **CLI entry point** — `scripts/run_backtest.py`:
 ```bash
+# Full run
 python scripts/run_backtest.py --strategy kalshi_divergence --start 2024-01-01 --end 2024-12-31 --bar-interval 5m --charts
+
+# Dry run — preview markets/instruments and date range without running simulation
+python scripts/run_backtest.py --strategy kalshi_divergence --start 2024-01-01 --end 2024-12-31 --dry-run
 ```
 
 ### Reporting & Analysis
@@ -188,22 +208,63 @@ python scripts/run_backtest.py --strategy kalshi_divergence --start 2024-01-01 -
 - Per-market P&L bar chart
 - Exposure over time stacked area chart
 
+## Config Isolation
+
+The live `Config` singleton in `config/settings.py` crashes at import time if env vars like `PRIVATE_KEY` are missing. Backtesting code must not transitively import any module that triggers this.
+
+**Approach:** Backtesting code under `src/layer1_research/backtesting/` only imports:
+- `src/utils.py` — math functions (logit, expit, fee calc, kelly). This module does not import `config/settings.py`.
+- NautilusTrader types
+- Standard library / third-party (DuckDB, matplotlib)
+
+It does **not** import from `src/layer2_signals/`, `src/layer3_portfolio/`, `src/layer4_execution/`, or `src/strategies/` — all of which depend on the live config. Instead, shared signal math is extracted into pure functions in `src/utils.py` (which is already config-independent).
+
 ## Integration with Existing Code
 
-- `src/utils.py` — reuse `kelly_fraction()`, `logit()`, `expit()`, fee math
-- `src/layer2_signals/` — wrap existing signal providers for historical replay
-- `config/settings.py` — backtest uses its own `BacktestConfig`, no changes to live `Config`
+- `src/utils.py` — reuse `kelly_criterion()`, `logit()`, `expit()`, `polymarket_taker_fee()`
+- Signal math extracted to pure functions in `src/utils.py` for sharing between live and backtest
+- `config/settings.py` — not imported by backtesting code; backtest uses its own `BacktestConfig`
 - No modifications to existing live trading code
 
 ## New Dependencies
 
-- `nautilus_trader` — backtesting framework
-- `duckdb` — querying external Parquet files during ETL
-- `matplotlib` or `plotly` — chart generation (optional)
+Added to `pyproject.toml` under `[project.optional-dependencies.backtesting]` so production deployments are not burdened:
+
+```toml
+[project.optional-dependencies]
+backtesting = [
+    "nautilus_trader",
+    "duckdb",
+    "matplotlib",
+]
+```
+
+Install with: `pip install -e ".[backtesting]"`
+
+## Testing
+
+Tests live in `tests/backtesting/`:
+
+```
+tests/backtesting/
+├── test_data_loaders.py         # Schema validation, column mapping, edge cases
+├── test_instruments.py          # BinaryOption factory, YES/NO pairing
+├── test_fees.py                 # Parabolic fee model vs known values
+├── test_sizer.py                # Kelly and fixed fractional sizing
+├── test_signal.py               # Signal dataclass validation
+├── test_runner_e2e.py           # Minimal end-to-end: synthetic data → strategy → results
+└── fixtures/
+    └── sample_data.py           # Small synthetic Parquet/trade datasets
+```
+
+The end-to-end test uses a trivial strategy (e.g., "always buy when price < 0.30") against synthetic data with known outcomes, to verify the full pipeline produces expected P&L.
 
 ## Workflow
 
 ```bash
+# 0. Install backtesting dependencies
+pip install -e ".[backtesting]"
+
 # 1. Load external data into Nautilus catalog
 python scripts/load_data.py --source becker --path ../prediction-market-analysis/data
 
@@ -212,6 +273,9 @@ python scripts/run_backtest.py --strategy kalshi_divergence --start 2024-01-01 -
 
 # 3. Run with charts
 python scripts/run_backtest.py --strategy kalshi_divergence --start 2024-01-01 --end 2024-12-31 --charts
+
+# 4. Dry run to preview
+python scripts/run_backtest.py --strategy kalshi_divergence --start 2024-01-01 --end 2024-12-31 --dry-run
 ```
 
 ## Data Source
