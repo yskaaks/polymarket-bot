@@ -1,8 +1,13 @@
 """Backtest runner: wires config, engine, strategy, and reporting together."""
+import inspect
+import tempfile
+from pathlib import Path
 from typing import Type
 
+import mlflow
 from nautilus_trader.backtest.engine import BacktestEngine, BacktestEngineConfig
 from nautilus_trader.config import LoggingConfig
+from nautilus_trader.risk.config import RiskEngineConfig
 from nautilus_trader.model.currencies import USD
 from nautilus_trader.model.enums import AccountType, OmsType
 from nautilus_trader.model.identifiers import Venue
@@ -30,6 +35,7 @@ class BacktestRunner:
 
         engine_config = BacktestEngineConfig(
             logging=LoggingConfig(log_level="WARNING"),
+            risk_engine=RiskEngineConfig(bypass=True),
         )
         engine = BacktestEngine(config=engine_config)
 
@@ -67,40 +73,53 @@ class BacktestRunner:
         if filtered_ticks:
             engine.add_data(filtered_ticks)
 
-        # Configure strategy
-        strategy_config = PredictionMarketStrategyConfig(
+        # Configure strategy — use the strategy's own config class if it
+        # declares one via __init__ type hints, so subclass-specific fields
+        # (e.g. FairValueMRConfig.exit_threshold) are available.
+        init_sig = inspect.signature(strategy_class.__init__)
+        config_param = init_sig.parameters.get("config")
+        if config_param and config_param.annotation is not inspect.Parameter.empty:
+            config_cls = config_param.annotation
+        else:
+            config_cls = PredictionMarketStrategyConfig
+
+        base_kwargs = dict(
             instrument_ids=instrument_id_strs,
             fee_rate_bps=self._config.fee_rate_bps,
             sizer_mode=self._config.position_sizer,
         )
+        base_kwargs.update(self._config.strategy_params)
+        strategy_config = config_cls(**base_kwargs)
         strategy = strategy_class(config=strategy_config)
         engine.add_strategy(strategy)
 
         # Run
         engine.run()
 
-        # Collect results
-        summary = self._build_summary(engine, strategy)
-        print_report(summary)
-        engine.dispose()
-
-        return summary
-
-    def _build_summary(self, engine: BacktestEngine, strategy: PredictionMarketStrategy) -> BacktestSummary:
+        # Collect results + MLflow tracking
         fills_report = engine.trader.generate_fills_report()
         positions_report = engine.trader.generate_positions_report()
+        account_report = engine.trader.generate_account_report(POLYMARKET_VENUE)
+
+        summary = self._build_summary(fills_report, positions_report, account_report)
+        print_report(summary)
+
+        self._log_to_mlflow(summary, fills_report, positions_report, account_report)
+
+        engine.dispose()
+        return summary
+
+    def _build_summary(self, fills_report, positions_report, account_report) -> BacktestSummary:
         total_trades = len(fills_report) if fills_report is not None and not fills_report.empty else 0
 
         final_equity = self._config.starting_capital
         total_fees = 0.0
 
         try:
-            account_report = engine.trader.generate_account_report(POLYMARKET_VENUE)
             if account_report is not None and not account_report.empty:
                 last_row = account_report.iloc[-1]
                 balance = last_row.get("total", self._config.starting_capital)
-                if isinstance(balance, (int, float)):
-                    final_equity = float(balance)
+                final_equity = float(balance)
 
             if fills_report is not None and "commission" in fills_report.columns:
                 total_fees = float(fills_report["commission"].sum())
@@ -116,9 +135,13 @@ class BacktestRunner:
         try:
             if positions_report is not None and not positions_report.empty:
                 if "realized_pnl" in positions_report.columns:
-                    closed = positions_report[positions_report["realized_pnl"] != 0]
+                    # realized_pnl may be "810.47 USD" strings — extract numeric part
+                    pnl = positions_report["realized_pnl"].apply(
+                        lambda x: float(str(x).split()[0]) if str(x).strip() else 0.0
+                    )
+                    closed = pnl[pnl != 0]
                     if len(closed) > 0:
-                        wins = (closed["realized_pnl"] > 0).sum()
+                        wins = (closed > 0).sum()
                         win_rate = wins / len(closed)
         except Exception:
             pass
@@ -140,3 +163,55 @@ class BacktestRunner:
             brier=None,
             fee_drag_pct=fee_drag(total_fees, gross_pnl),
         )
+
+    def _log_to_mlflow(self, summary: BacktestSummary, fills_report, positions_report, account_report):
+        """Log backtest run to MLflow: metrics, params, and trade artifacts."""
+        mlflow.set_experiment("polymarket-backtests")
+
+        with mlflow.start_run(run_name=f"{summary.strategy_name}_{summary.start}_{summary.end}"):
+            # Log config as params
+            mlflow.log_params({
+                "strategy": summary.strategy_name,
+                "start": summary.start,
+                "end": summary.end,
+                "starting_capital": self._config.starting_capital,
+                "data_mode": self._config.data_mode,
+                "fee_rate_bps": self._config.fee_rate_bps,
+                "position_sizer": self._config.position_sizer,
+            })
+            if self._config.strategy_params:
+                mlflow.log_params({
+                    f"strategy.{k}": v for k, v in self._config.strategy_params.items()
+                })
+
+            # Log metrics
+            mlflow.log_metrics({
+                "final_equity": summary.final_equity,
+                "total_return_pct": summary.total_return_pct,
+                "sharpe_ratio": summary.sharpe_ratio,
+                "max_drawdown_pct": summary.max_drawdown_pct,
+                "win_rate": summary.win_rate,
+                "total_trades": summary.total_trades,
+                "total_fees": summary.total_fees,
+                "fee_drag_pct": summary.fee_drag_pct,
+            })
+
+            # Save fills, positions, account as parquet artifacts
+            # Drop columns that pyarrow can't serialize (empty structs, etc.)
+            drop_cols = {"info", "margins"}
+            with tempfile.TemporaryDirectory() as tmpdir:
+                artifacts_dir = Path(tmpdir)
+                if fills_report is not None and not fills_report.empty:
+                    fills_path = artifacts_dir / "fills.parquet"
+                    fills_report.drop(columns=drop_cols & set(fills_report.columns), errors="ignore").to_parquet(fills_path)
+                    mlflow.log_artifact(str(fills_path))
+
+                if positions_report is not None and not positions_report.empty:
+                    positions_path = artifacts_dir / "positions.parquet"
+                    positions_report.drop(columns=drop_cols & set(positions_report.columns), errors="ignore").to_parquet(positions_path)
+                    mlflow.log_artifact(str(positions_path))
+
+                if account_report is not None and not account_report.empty:
+                    account_path = artifacts_dir / "account_history.parquet"
+                    account_report.drop(columns=drop_cols & set(account_report.columns), errors="ignore").to_parquet(account_path)
+                    mlflow.log_artifact(str(account_path))
