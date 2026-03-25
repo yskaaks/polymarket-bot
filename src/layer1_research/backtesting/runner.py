@@ -5,13 +5,17 @@ from pathlib import Path
 from typing import Type
 
 import mlflow
+from decimal import Decimal
+
 from nautilus_trader.backtest.engine import BacktestEngine, BacktestEngineConfig
+from nautilus_trader.backtest.models import MakerTakerFeeModel
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.risk.config import RiskEngineConfig
 from nautilus_trader.model.currencies import USD
-from nautilus_trader.model.enums import AccountType, OmsType
-from nautilus_trader.model.identifiers import Venue
-from nautilus_trader.model.objects import Money
+from nautilus_trader.model.enums import AccountType, AssetClass, OmsType
+from nautilus_trader.model.identifiers import InstrumentId, Symbol, Venue
+from nautilus_trader.model.instruments import BinaryOption
+from nautilus_trader.model.objects import Money, Price, Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 from src.layer1_research.backtesting.config import BacktestConfig
@@ -39,24 +43,46 @@ class BacktestRunner:
         )
         engine = BacktestEngine(config=engine_config)
 
-        # Add simulated venue
+        # Add simulated venue with fee model
         engine.add_venue(
             venue=POLYMARKET_VENUE,
             oms_type=OmsType.NETTING,
             account_type=AccountType.CASH,
             starting_balances=[Money(self._config.starting_capital, USD)],
+            fee_model=MakerTakerFeeModel(),
         )
 
-        # Load instruments from catalog
-        instruments = catalog.instruments()
+        # Load instruments from catalog, overriding fees from config
+        fee_rate = Decimal(str(self._config.fee_rate_bps / 10_000))
+        raw_instruments = catalog.instruments()
         if self._config.markets:
-            instruments = [
-                inst for inst in instruments
+            raw_instruments = [
+                inst for inst in raw_instruments
                 if any(m in str(inst.id) for m in self._config.markets)
             ]
 
-        for instrument in instruments:
-            engine.add_instrument(instrument)
+        instruments = []
+        for inst in raw_instruments:
+            # Rebuild with correct fee rate (catalog stores maker_fee=0)
+            rebuilt = BinaryOption(
+                instrument_id=inst.id,
+                raw_symbol=inst.raw_symbol,
+                asset_class=inst.asset_class,
+                currency=inst.quote_currency,
+                price_precision=inst.price_precision,
+                size_precision=inst.size_precision,
+                price_increment=inst.price_increment,
+                size_increment=inst.size_increment,
+                activation_ns=inst.activation_ns,
+                expiration_ns=inst.expiration_ns,
+                ts_event=inst.ts_event,
+                ts_init=inst.ts_init,
+                maker_fee=fee_rate,
+                taker_fee=fee_rate,
+                outcome=inst.outcome,
+            )
+            instruments.append(rebuilt)
+            engine.add_instrument(rebuilt)
 
         # Load trade ticks, passing instrument_ids as strings
         instrument_id_strs = [str(inst.id) for inst in instruments]
@@ -122,7 +148,10 @@ class BacktestRunner:
                 final_equity = float(balance)
 
             if fills_report is not None and "commission" in fills_report.columns:
-                total_fees = float(fills_report["commission"].sum())
+                # commission may be "5.01 USD" strings — extract numeric part
+                total_fees = float(fills_report["commission"].apply(
+                    lambda x: float(str(x).split()[0]) if str(x).strip() else 0.0
+                ).sum())
         except Exception:
             pass
 
@@ -166,6 +195,7 @@ class BacktestRunner:
 
     def _log_to_mlflow(self, summary: BacktestSummary, fills_report, positions_report, account_report):
         """Log backtest run to MLflow: metrics, params, and trade artifacts."""
+        mlflow.set_tracking_uri(f"sqlite:///{Path(self._config.catalog_path).parent / 'mlflow.db'}")
         mlflow.set_experiment("polymarket-backtests")
 
         with mlflow.start_run(run_name=f"{summary.strategy_name}_{summary.start}_{summary.end}"):
