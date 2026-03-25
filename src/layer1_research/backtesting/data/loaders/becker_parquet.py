@@ -45,7 +45,10 @@ class BeckerParquetLoader(DataLoader):
         self._blocks_glob = str(self._poly_dir / "blocks" / "*.parquet")
 
         # Persistent connection + materialized trade table (lazy init)
-        self._db_path = Path(tempfile.gettempdir()) / "polymarket_etl.duckdb"
+        # Derive DB name from data dir so different sources don't collide
+        import hashlib
+        dir_hash = hashlib.md5(str(self._data_dir.resolve()).encode()).hexdigest()[:12]
+        self._db_path = Path(tempfile.gettempdir()) / f"polymarket_etl_{dir_hash}.duckdb"
         self._con: Optional[duckdb.DuckDBPyConnection] = None
         self._db_ready = False
 
