@@ -53,3 +53,4 @@ CLAUDE.md
 # Backtesting data catalog
 data/catalog/
 output/backtests/
+.tmp

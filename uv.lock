@@ -1465,6 +1465,7 @@ backtesting = [
     { name = "duckdb" },
     { name = "matplotlib" },
     { name = "nautilus-trader" },
+    { name = "tqdm" },
 ]
 
 [package.metadata]
@@ -1476,6 +1477,7 @@ requires-dist = [
     { name = "py-clob-client", specifier = ">=0.18.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "requests", specifier = ">=2.31.0" },
+    { name = "tqdm", marker = "extra == 'backtesting'", specifier = ">=4.66.0" },
     { name = "web3", specifier = ">=6.11.0" },
     { name = "websockets", specifier = ">=12.0" },
 ]
