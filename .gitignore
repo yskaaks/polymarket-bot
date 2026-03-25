@@ -54,3 +54,5 @@ CLAUDE.md
 data/catalog/
 output/backtests/
 .tmp
+mlruns/
+mlflow.db
