@@ -65,6 +65,8 @@ def build_catalog(loader: DataLoader, catalog_path: str,
             instrument_id = InstrumentId(symbol=Symbol(token_id), venue=POLYMARKET_VENUE)
             batch = []
             for i, raw_trade in enumerate(loader.get_trades(token_id)):
+                if raw_trade.size < 0.05:
+                    continue  # Too small to represent at precision=1
                 ts_ns = int(raw_trade.timestamp.timestamp() * 1e9)
                 aggressor_side = AggressorSide.BUYER if raw_trade.side == "BUY" else AggressorSide.SELLER
                 tick = TradeTick(
