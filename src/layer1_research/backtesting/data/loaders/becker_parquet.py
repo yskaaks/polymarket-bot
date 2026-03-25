@@ -16,11 +16,13 @@ Trade schema (from CTF Exchange logs):
     block_number: joined to blocks table for timestamp
 """
 import json
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
 import duckdb
+from tqdm import tqdm
 
 from src.layer1_research.backtesting.data.loaders.base import DataLoader
 from src.layer1_research.backtesting.data.models import MarketFilter, MarketInfo, RawTrade
@@ -42,6 +44,60 @@ class BeckerParquetLoader(DataLoader):
         self._trades_glob = str(self._poly_dir / "trades" / "*.parquet")
         self._blocks_glob = str(self._poly_dir / "blocks" / "*.parquet")
 
+        # Persistent connection + materialized trade table (lazy init)
+        self._db_path = Path(tempfile.gettempdir()) / "polymarket_etl.duckdb"
+        self._con: Optional[duckdb.DuckDBPyConnection] = None
+        self._db_ready = False
+
+    def _ensure_trade_db(self):
+        """One-time: scan all parquet files, join trades+blocks, materialize into
+        an indexed DuckDB table. Subsequent per-token queries are instant."""
+        if self._db_ready:
+            return
+
+        # Use file-backed DB so DuckDB can spill to disk
+        self._con = duckdb.connect(str(self._db_path))
+
+        # Check if table already exists (from a previous run)
+        tables = [r[0] for r in self._con.execute("SHOW TABLES").fetchall()]
+        if "trades" in tables:
+            count = self._con.execute("SELECT count(*) FROM trades").fetchone()[0]
+            print(f"Reusing existing trade DB: {count:,} trades ({self._db_path})")
+            self._db_ready = True
+            return
+
+        print(f"Building trade database (one-time parquet scan)...")
+        print(f"  DB location: {self._db_path}")
+
+        self._con.execute(f"""
+            CREATE TABLE trades AS
+            SELECT
+                CASE WHEN t.maker_asset_id = '0' THEN t.taker_asset_id
+                     ELSE t.maker_asset_id END as token_id,
+                CASE WHEN t.maker_asset_id = '0' THEN 'BUY' ELSE 'SELL' END as side,
+                CASE WHEN t.maker_asset_id = '0'
+                     THEN t.maker_amount::DOUBLE / t.taker_amount::DOUBLE
+                     ELSE t.taker_amount::DOUBLE / t.maker_amount::DOUBLE
+                END as price,
+                CASE WHEN t.maker_asset_id = '0'
+                     THEN t.taker_amount::DOUBLE / {AMOUNT_SCALE}
+                     ELSE t.maker_amount::DOUBLE / {AMOUNT_SCALE}
+                END as size,
+                t.maker, t.taker,
+                b.timestamp as block_timestamp
+            FROM read_parquet('{self._trades_glob}', union_by_name=true) t
+            JOIN read_parquet('{self._blocks_glob}', union_by_name=true) b
+                ON t.block_number = b.block_number
+            WHERE t.maker_amount > 0 AND t.taker_amount > 0
+        """)
+
+        count = self._con.execute("SELECT count(*) FROM trades").fetchone()[0]
+        print(f"  Loaded {count:,} trades, creating index...")
+
+        self._con.execute("CREATE INDEX idx_token ON trades(token_id)")
+        print(f"  Trade database ready!")
+        self._db_ready = True
+
     def load_markets(self, filters: Optional[MarketFilter] = None) -> list[MarketInfo]:
         con = duckdb.connect()
         try:
@@ -59,8 +115,13 @@ class BeckerParquetLoader(DataLoader):
                 if filters.market_ids is not None:
                     ids = ",".join(f"'{m}'" for m in filters.market_ids)
                     conditions.append(f"condition_id IN ({ids})")
+                if filters.date_start is not None:
+                    conditions.append(f"created_at >= '{filters.date_start.isoformat()}'")
+                if filters.date_end is not None:
+                    conditions.append(f"created_at <= '{filters.date_end.isoformat()}'")
             if conditions:
                 query += " WHERE " + " AND ".join(conditions)
+            query += " ORDER BY volume DESC"
 
             rows = con.execute(query).fetchall()
         finally:
@@ -85,65 +146,54 @@ class BeckerParquetLoader(DataLoader):
 
     def get_trades(self, token_id: str, start: Optional[datetime] = None,
                    end: Optional[datetime] = None) -> Iterator[RawTrade]:
-        """Load trades for a specific token ID.
+        """Load trades for a single token. Uses indexed DB for fast lookup."""
+        self._ensure_trade_db()
 
-        In the CTF Exchange, each trade has a maker and taker side:
-        - maker_asset_id = "0" means maker pays USDC → maker is BUYING the token
-        - taker_asset_id = "0" means taker pays USDC → maker is SELLING the token
-
-        The token_id can appear as either maker_asset_id or taker_asset_id.
-        """
-        con = duckdb.connect()
-        try:
-            query = f"""
-                SELECT t.maker_asset_id, t.taker_asset_id,
-                       t.maker_amount, t.taker_amount, t.fee,
-                       t.maker, t.taker,
-                       b.timestamp as block_timestamp
-                FROM read_parquet('{self._trades_glob}', union_by_name=true) t
-                LEFT JOIN read_parquet('{self._blocks_glob}', union_by_name=true) b
-                    ON t.block_number = b.block_number
-                WHERE t.maker_asset_id = $1 OR t.taker_asset_id = $1
-                ORDER BY b.timestamp ASC, t.log_index ASC
-            """
-            rows = con.execute(query, [token_id]).fetchall()
-        finally:
-            con.close()
+        rows = self._con.execute("""
+            SELECT side, price, size, maker, taker, block_timestamp
+            FROM trades
+            WHERE token_id = $1
+            ORDER BY block_timestamp ASC
+        """, [token_id]).fetchall()
 
         for row in rows:
-            (maker_asset_id, taker_asset_id, maker_amount, taker_amount,
-             fee, maker, taker, block_ts) = row
-
-            if block_ts is None:
-                continue
-
-            # Determine side and price from which side holds the token
-            if maker_asset_id == "0":
-                # Maker pays USDC, taker pays tokens → BUY
-                side = "BUY"
-                usdc_amount = maker_amount
-                token_amount = taker_amount
-            else:
-                # Maker pays tokens, taker pays USDC → SELL
-                side = "SELL"
-                usdc_amount = taker_amount
-                token_amount = maker_amount
-
-            if token_amount == 0:
-                continue
-
-            price = float(usdc_amount) / float(token_amount)
+            side, price, size, maker, taker, block_ts = row
             price = max(0.001, min(1.0, price))
-            size = float(token_amount) / AMOUNT_SCALE
-
-            # Parse block timestamp (VARCHAR in blocks table)
             timestamp = self._parse_block_timestamp(block_ts)
-
             yield RawTrade(
                 timestamp=timestamp, market_id=token_id, token_id=token_id,
                 side=side, price=price, size=size, source="polymarket",
                 maker=maker, taker=taker,
             )
+
+    def get_trades_bulk(self, token_ids: set[str],
+                        progress: bool = True) -> Iterator[tuple[str, RawTrade]]:
+        """Iterate trades for many tokens using the indexed DB.
+
+        Yields (token_id, RawTrade) pairs, grouped by token_id.
+        """
+        self._ensure_trade_db()
+
+        tokens = sorted(token_ids)
+        it = tqdm(tokens, desc="Querying tokens", unit="tok") if progress else tokens
+
+        for token_id in it:
+            rows = self._con.execute("""
+                SELECT side, price, size, maker, taker, block_timestamp
+                FROM trades
+                WHERE token_id = $1
+                ORDER BY block_timestamp ASC
+            """, [token_id]).fetchall()
+
+            for row in rows:
+                side, price, size, maker, taker, block_ts = row
+                price = max(0.001, min(1.0, price))
+                timestamp = self._parse_block_timestamp(block_ts)
+                yield (token_id, RawTrade(
+                    timestamp=timestamp, market_id=token_id, token_id=token_id,
+                    side=side, price=price, size=size, source="polymarket",
+                    maker=maker, taker=taker,
+                ))
 
     @staticmethod
     def _parse_block_timestamp(ts) -> datetime:

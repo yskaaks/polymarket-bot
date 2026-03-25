@@ -16,7 +16,9 @@ import time
 DEFAULT_SOURCE = "becker"
 DEFAULT_DATA_PATH = "../prediction-market-analysis/data"
 DEFAULT_CATALOG_PATH = "data/catalog"
-DEFAULT_MIN_VOLUME = 100_000
+DEFAULT_MIN_VOLUME = 100
+# Trades data starts at 2023-03-05 (CTF Exchange era); exclude older markets
+DEFAULT_DATE_START = "2023-03-01"
 
 
 def main():
@@ -26,11 +28,15 @@ def main():
     parser.add_argument("--catalog", default=DEFAULT_CATALOG_PATH, help=f"Output catalog directory (default: {DEFAULT_CATALOG_PATH})")
     parser.add_argument("--min-volume", type=float, default=DEFAULT_MIN_VOLUME, help=f"Minimum market volume filter (default: {DEFAULT_MIN_VOLUME})")
     parser.add_argument("--resolved-only", action="store_true", help="Only load resolved markets")
+    parser.add_argument("--date-start", default=DEFAULT_DATE_START, help=f"Earliest market created_at (default: {DEFAULT_DATE_START}, trades data starts 2023-03)")
+    parser.add_argument("--limit", type=int, default=100, help="Max number of markets to process (for quick testing)")
     parser.add_argument("--dry-run", action="store_true", help="Preview markets without loading trades")
     args = parser.parse_args()
 
+    from datetime import datetime, timezone
     from src.layer1_research.backtesting.data.models import MarketFilter
-    filters = MarketFilter(min_volume=args.min_volume, resolved_only=args.resolved_only)
+    date_start = datetime.fromisoformat(args.date_start).replace(tzinfo=timezone.utc) if args.date_start else None
+    filters = MarketFilter(min_volume=args.min_volume, resolved_only=args.resolved_only, date_start=date_start)
 
     if args.source == "becker":
         from src.layer1_research.backtesting.data.loaders.becker_parquet import BeckerParquetLoader
@@ -51,8 +57,10 @@ def main():
     from src.layer1_research.backtesting.data.catalog import build_catalog
     print(f"Loading data from {args.path} -> {args.catalog}")
     print(f"Filters: min_volume={args.min_volume}, resolved_only={args.resolved_only}")
+    if args.limit:
+        print(f"Limit: first {args.limit} markets only")
     start = time.time()
-    result = build_catalog(loader, args.catalog, filters=filters)
+    result = build_catalog(loader, args.catalog, filters=filters, limit=args.limit)
     elapsed = time.time() - start
     print(f"\nCatalog built in {elapsed:.1f}s:")
     print(f"  Markets:     {result.markets_loaded}")
