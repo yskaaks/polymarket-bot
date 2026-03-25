@@ -19,6 +19,7 @@ from nautilus_trader.model.objects import Money, Price, Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 from src.layer1_research.backtesting.config import BacktestConfig
+from src.layer1_research.backtesting.execution.fill_model import PredictionMarketFillModel
 from src.layer1_research.backtesting.reporting.cli_report import print_report
 from src.layer1_research.backtesting.reporting.metrics import BacktestSummary, fee_drag
 from src.layer1_research.backtesting.strategies.base import (
@@ -43,13 +44,19 @@ class BacktestRunner:
         )
         engine = BacktestEngine(config=engine_config)
 
-        # Add simulated venue with fee model
+        # Build fill model from config (None = no slippage)
+        fill_model = None
+        if self._config.fill_model is not None:
+            fill_model = PredictionMarketFillModel(self._config.fill_model)
+
+        # Add simulated venue with fee + fill models
         engine.add_venue(
             venue=POLYMARKET_VENUE,
             oms_type=OmsType.NETTING,
             account_type=AccountType.CASH,
             starting_balances=[Money(self._config.starting_capital, USD)],
             fee_model=MakerTakerFeeModel(),
+            fill_model=fill_model,
         )
 
         # Load instruments from catalog, overriding fees from config

@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal, Optional
 
+from src.layer1_research.backtesting.execution.fill_model import PredictionMarketFillConfig
+
 
 @dataclass
 class BacktestConfig:
@@ -23,6 +25,7 @@ class BacktestConfig:
     max_position_pct: float = 0.10
     max_total_exposure_pct: float = 0.50
     generate_charts: bool = False
+    fill_model: Optional[PredictionMarketFillConfig] = None
 
     def __post_init__(self):
         if self.start >= self.end:

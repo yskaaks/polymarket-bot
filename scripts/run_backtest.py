@@ -33,6 +33,8 @@ def main():
     parser.add_argument("--bar-interval", type=int, default=5, help="Bar interval in minutes")
     parser.add_argument("--sizer", choices=["kelly", "fixed_fractional"], default="fixed_fractional")
     parser.add_argument("--fee-bps", type=int, default=0, help="Fee rate in basis points")
+    parser.add_argument("--slippage", action="store_true", help="Enable prediction market slippage model")
+    parser.add_argument("--spread", type=float, default=0.04, help="Base bid-ask spread for slippage model (default: 0.04)")
     parser.add_argument("--charts", action="store_true", help="Generate charts")
     parser.add_argument("--dry-run", action="store_true", help="Preview config without running")
     args = parser.parse_args()
@@ -46,6 +48,11 @@ def main():
 
     from src.layer1_research.backtesting.config import BacktestConfig
 
+    fill_model_config = None
+    if args.slippage:
+        from src.layer1_research.backtesting.execution.fill_model import PredictionMarketFillConfig
+        fill_model_config = PredictionMarketFillConfig(base_spread_pct=args.spread)
+
     config = BacktestConfig(
         catalog_path=args.catalog,
         start=datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc),
@@ -57,6 +64,7 @@ def main():
         fee_rate_bps=args.fee_bps,
         position_sizer=args.sizer,
         generate_charts=args.charts,
+        fill_model=fill_model_config,
     )
 
     if args.dry_run:
@@ -69,6 +77,7 @@ def main():
             print(f"  Bar interval: {config.bar_interval}")
         print(f"  Sizer:        {config.position_sizer}")
         print(f"  Fee rate:     {config.fee_rate_bps} bps")
+        print(f"  Slippage:     {'ON (spread={:.0%})'.format(config.fill_model.base_spread_pct) if config.fill_model else 'OFF'}")
         print(f"  Catalog:      {config.catalog_path}")
         return
 
