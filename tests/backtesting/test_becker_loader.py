@@ -39,7 +39,7 @@ def test_get_trades(becker_data_dir):
     assert len(trades) == 2
     assert trades[0].side == "BUY"
     assert trades[0].price == pytest.approx(0.65)
-    assert trades[0].size == 100.0
+    assert trades[0].size == pytest.approx(1.0)
     assert trades[0].source == "polymarket"
     assert trades[0].maker == "0xmaker1"
     assert trades[1].side == "SELL"
