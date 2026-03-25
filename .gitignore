@@ -49,3 +49,10 @@ htmlcov/
 CLAUDE.md
 .claude/
 *.pem
+
+# Backtesting data catalog
+data/catalog/
+output/backtests/
+.tmp
+mlruns/
+mlflow.db
