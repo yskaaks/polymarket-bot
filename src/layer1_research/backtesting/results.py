@@ -50,3 +50,37 @@ class SignalSnapshot:
         if self.direction == "SELL":
             return self.market_price - (1.0 - self.confidence)
         return 0.0
+
+
+@dataclass(frozen=True)
+class Trade:
+    """Round-trip trade: entry fill -> exit fill (or still-open at EOB)."""
+
+    instrument_id: str
+    direction: str                 # "LONG" or "SHORT"
+    entry_ts: datetime
+    exit_ts: Optional[datetime]    # None if still open at end of backtest
+    entry_price: float
+    exit_price: Optional[float]    # None if still open
+    size: float
+    fees: float
+    gross_pnl: float
+    net_pnl: float                 # gross_pnl - fees
+    edge_at_entry: float           # from the SignalSnapshot that opened it
+    slippage_bps: float            # fill price vs. signal market_price
+    signal_confidence: float
+
+    def __post_init__(self):
+        if self.direction not in ("LONG", "SHORT"):
+            raise ValueError(
+                f"direction must be LONG or SHORT, got '{self.direction}'"
+            )
+
+    @property
+    def realized_edge(self) -> Optional[float]:
+        """Actual edge captured at exit. None if position is still open."""
+        if self.exit_price is None:
+            return None
+        if self.direction == "LONG":
+            return self.exit_price - self.entry_price
+        return self.entry_price - self.exit_price   # SHORT
