@@ -7,7 +7,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+import pandas as pd
+
+if TYPE_CHECKING:
+    from src.layer1_research.backtesting.config import BacktestConfig
 
 
 @dataclass(frozen=True)
@@ -84,3 +89,71 @@ class Trade:
         if self.direction == "LONG":
             return self.exit_price - self.entry_price
         return self.entry_price - self.exit_price   # SHORT
+
+
+def _parse_usd_series(s: pd.Series) -> pd.Series:
+    """Convert a Nautilus money-string column ('5.01 USD') into a float column.
+
+    Empty strings become 0.0 (Nautilus emits "" for zero commissions sometimes).
+    """
+    def _parse(v) -> float:
+        if v is None:
+            return 0.0
+        s = str(v).strip()
+        if not s:
+            return 0.0
+        return float(s.split()[0])
+    return s.apply(_parse).astype(float)
+
+
+_USD_COLUMNS = ("commission", "realized_pnl", "unrealized_pnl", "total", "free", "locked")
+
+
+def _clean_usd_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of `df` with any known USD string columns parsed to floats."""
+    if df is None or df.empty:
+        return df if df is not None else pd.DataFrame()
+    out = df.copy()
+    for col in _USD_COLUMNS:
+        if col in out.columns and out[col].dtype == object:
+            out[col] = _parse_usd_series(out[col])
+    return out
+
+
+@dataclass
+class BacktestResult:
+    """Output of BacktestRunner.run(). Contains raw reports + derived views."""
+
+    config: BacktestConfig
+    fills: pd.DataFrame
+    positions: pd.DataFrame
+    account: pd.DataFrame
+    instruments: list               # list[BinaryOption]
+    analyzer_stats: dict            # from nautilus trader.analyzer
+    signals: pd.DataFrame           # one row per SignalSnapshot
+    trades: pd.DataFrame            # one row per Trade
+
+    # Derived, filled by __post_init__
+    equity_curve: pd.Series = None  # type: ignore[assignment]
+
+    def __post_init__(self):
+        # Clean string-money columns on the Nautilus frames
+        self.fills = _clean_usd_columns(self.fills)
+        self.positions = _clean_usd_columns(self.positions)
+        self.account = _clean_usd_columns(self.account)
+
+        if self.account is None or self.account.empty:
+            raise ValueError(
+                "BacktestResult constructed with empty account report — "
+                "the engine did not record any balance snapshots"
+            )
+        if "total" not in self.account.columns:
+            raise ValueError(
+                f"account report missing 'total' column; got {list(self.account.columns)}"
+            )
+
+        # Equity curve: account['total'] series, indexed by the account df's index
+        # (Nautilus uses a DatetimeIndex). Forward-fill gaps so flat periods carry
+        # the previous balance.
+        self.equity_curve = self.account["total"].astype(float).copy()
+        self.equity_curve.name = "equity_usd"

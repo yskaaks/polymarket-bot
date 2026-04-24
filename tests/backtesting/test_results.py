@@ -112,3 +112,69 @@ def test_trade_open_position_realized_edge_none():
         edge_at_entry=0.30, slippage_bps=0.0, signal_confidence=0.70,
     )
     assert t.realized_edge is None
+
+
+def test_parse_usd_column():
+    from src.layer1_research.backtesting.results import _parse_usd_series
+    import pandas as pd
+    s = pd.Series(["5.01 USD", "0.00 USD", "-2.50 USD", ""])
+    out = _parse_usd_series(s)
+    assert list(out) == [pytest.approx(5.01), pytest.approx(0.0),
+                         pytest.approx(-2.50), pytest.approx(0.0)]
+
+
+def test_backtest_result_construction_minimal():
+    """BacktestResult can be built from minimal Nautilus-like reports."""
+    from src.layer1_research.backtesting.results import BacktestResult
+    from src.layer1_research.backtesting.config import BacktestConfig
+    import pandas as pd
+
+    config = BacktestConfig(
+        catalog_path="data/catalog",
+        start=datetime(2024, 6, 1, tzinfo=timezone.utc),
+        end=datetime(2024, 6, 2, tzinfo=timezone.utc),
+        strategy_name="test", starting_capital=10_000.0, data_mode="trade",
+    )
+    account = pd.DataFrame({
+        "total": ["10000.00 USD", "10050.00 USD", "9980.00 USD"],
+    }, index=pd.to_datetime([
+        "2024-06-01T00:00:00Z", "2024-06-01T12:00:00Z", "2024-06-02T00:00:00Z",
+    ], utc=True))
+
+    result = BacktestResult(
+        config=config,
+        fills=pd.DataFrame(),
+        positions=pd.DataFrame(),
+        account=account,
+        instruments=[],
+        analyzer_stats={},
+        signals=pd.DataFrame(),
+        trades=pd.DataFrame(),
+    )
+    # equity_curve is built from account["total"], values are floats
+    assert result.equity_curve.iloc[0] == pytest.approx(10_000.0)
+    assert result.equity_curve.iloc[-1] == pytest.approx(9_980.0)
+    # account["total"] is also cleaned to float
+    assert result.account["total"].dtype.kind == "f"
+
+
+def test_backtest_result_equity_curve_empty_account_raises():
+    """Empty account report is a real error, not a silent zero."""
+    from src.layer1_research.backtesting.results import BacktestResult
+    from src.layer1_research.backtesting.config import BacktestConfig
+    import pandas as pd
+
+    config = BacktestConfig(
+        catalog_path="data/catalog",
+        start=datetime(2024, 6, 1, tzinfo=timezone.utc),
+        end=datetime(2024, 6, 2, tzinfo=timezone.utc),
+        strategy_name="test", starting_capital=10_000.0, data_mode="trade",
+    )
+    with pytest.raises(ValueError, match="empty account"):
+        BacktestResult(
+            config=config,
+            fills=pd.DataFrame(), positions=pd.DataFrame(),
+            account=pd.DataFrame(),
+            instruments=[], analyzer_stats={},
+            signals=pd.DataFrame(), trades=pd.DataFrame(),
+        )
