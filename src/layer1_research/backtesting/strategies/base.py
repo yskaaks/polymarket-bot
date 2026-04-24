@@ -34,6 +34,8 @@ class PredictionMarketStrategy(Strategy):
     def __init__(self, config: PredictionMarketStrategyConfig):
         super().__init__(config)
         self._instrument_map: dict[InstrumentId, BinaryOption] = {}
+        # Captured per emitted signal; pulled out by the runner post-run.
+        self._signal_log: list = []
 
     def generate_signal(self, instrument: BinaryOption, data) -> Optional[Signal]:
         """Generate a trading signal from incoming market data.
@@ -71,32 +73,62 @@ class PredictionMarketStrategy(Strategy):
             self._act_on_signal(signal, instrument, bar)
 
     def _act_on_signal(self, signal: Signal, instrument: BinaryOption, data):
+        from datetime import datetime, timezone
+        from src.layer1_research.backtesting.results import SignalSnapshot
+
+        # Price at signal time — trade tick has .price; bar has .close.
+        if hasattr(data, "price"):
+            market_price = float(data.price)
+        elif hasattr(data, "close"):
+            market_price = float(data.close)
+        else:
+            raise ValueError(
+                f"Cannot extract price from signal data {type(data).__name__}"
+            )
+        ts_ns = int(data.ts_event)
+        ts = datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc)
+
         if signal.direction == "FLAT":
+            # Log the flat signal for analysis, then close.
+            self._signal_log.append(SignalSnapshot(
+                ts=ts, instrument_id=str(instrument.id), direction="FLAT",
+                market_price=market_price, confidence=signal.confidence,
+                target_price=signal.target_price, size=0.0,
+                client_order_id=None,
+            ))
             self._close_position(instrument)
             return
 
+        # Determine size: explicit on the signal, or computed via sizer.
         if signal.size is not None:
             size = signal.size
         else:
-            try:
-                account = self.portfolio.account(instrument.id.venue)
-                balance = account.balance_total(instrument.currency)
-                capital = float(balance) if balance else 10_000.0
-            except Exception:
-                capital = 10_000.0
-
+            account = self.portfolio.account(instrument.id.venue)
+            balance = account.balance_total(instrument.currency)
+            capital = float(balance)
             if self.config.sizer_mode == "kelly":
                 size = kelly_size(
                     capital=capital, win_prob=signal.confidence,
-                    price=signal.target_price, max_fraction=self.config.kelly_max_fraction,
+                    price=signal.target_price,
+                    max_fraction=self.config.kelly_max_fraction,
                 )
             else:
                 size = fixed_fractional_size(
                     capital=capital, fraction=self.config.fixed_fraction,
-                    price=signal.target_price, max_size=self.config.max_position_size,
+                    price=signal.target_price,
+                    max_size=self.config.max_position_size,
                 )
 
         if size <= 0:
+            # Signal fired but sizer rejected — still log as FLAT-equivalent
+            # so downstream metrics know the signal existed.
+            self._signal_log.append(SignalSnapshot(
+                ts=ts, instrument_id=str(instrument.id),
+                direction=signal.direction,
+                market_price=market_price, confidence=signal.confidence,
+                target_price=signal.target_price, size=0.0,
+                client_order_id=None,
+            ))
             return
 
         order_side = OrderSide.BUY if signal.direction == "BUY" else OrderSide.SELL
@@ -105,6 +137,14 @@ class PredictionMarketStrategy(Strategy):
             order_side=order_side,
             quantity=instrument.make_qty(size),
         )
+        client_oid = getattr(order.client_order_id, "value", str(order.client_order_id))
+        self._signal_log.append(SignalSnapshot(
+            ts=ts, instrument_id=str(instrument.id),
+            direction=signal.direction,
+            market_price=market_price, confidence=signal.confidence,
+            target_price=signal.target_price, size=size,
+            client_order_id=client_oid,
+        ))
         self.submit_order(order)
 
     def _close_position(self, instrument: BinaryOption):
