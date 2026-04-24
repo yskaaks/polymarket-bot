@@ -161,7 +161,6 @@ class BeckerParquetLoader(DataLoader):
 
         for row in rows:
             side, price, size, maker, taker, block_ts = row
-            price = max(0.001, min(1.0, price))
             timestamp = self._parse_block_timestamp(block_ts)
             yield RawTrade(
                 timestamp=timestamp, market_id=token_id, token_id=token_id,
@@ -190,7 +189,6 @@ class BeckerParquetLoader(DataLoader):
 
             for row in rows:
                 side, price, size, maker, taker, block_ts = row
-                price = max(0.001, min(1.0, price))
                 timestamp = self._parse_block_timestamp(block_ts)
                 yield (token_id, RawTrade(
                     timestamp=timestamp, market_id=token_id, token_id=token_id,
