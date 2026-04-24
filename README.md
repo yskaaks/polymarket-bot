@@ -76,12 +76,10 @@ Orchestrated by `src/strategies/uma_arb_strategy.py` which wires all layers toge
 │   ├── orderbook.py                       # Orderbook analysis + arb detection
 │   ├── websocket_feed.py                  # Async WebSocket feed
 │   └── utils.py                           # Logging, math, formatting helpers
-├── scripts/
-│   ├── debug_uma_signal.py                # Debug signal generation pipeline
-│   ├── test_connection.py                 # API connectivity tests
-│   ├── check_allowances.py               # EOA wallet allowance guide
-│   ├── explore_market.py                  # Interactive market explorer
-│   └── view_markets.py                    # Market listing utility
+├── notebooks/                            # Entry points grouped by layer
+│   ├── layer0_ingestion/                 # CLOB, UMA, market discovery
+│   ├── layer1_research/                  # ETL + backtesting
+│   └── layer4_execution/                 # Preflight checks
 └── examples/
     ├── place_limit_order.py               # Single limit order demo
     └── market_making_demo.py              # Two-sided market making demo
@@ -116,18 +114,18 @@ The core strategy monitors UMA Optimistic Oracle V3 on Polygon for `Settle` even
 
 ## Running
 
+Open a notebook under `notebooks/` in VS Code or Jupyter and run top-to-bottom. Examples:
+
+- `notebooks/layer1_research/01_build_catalog.ipynb` — one-time ETL from Becker Parquet dump into the Nautilus catalog
+- `notebooks/layer1_research/03_run_backtest_fair_value_mr.ipynb` — backtest the mean-reversion strategy
+- `notebooks/layer1_research/04_run_backtest_hold_cash.ipynb` — engine correctness check (capital preserved, zero trades)
+- `notebooks/layer0_ingestion/check_allowances.ipynb` — EOA wallet allowance helper
+- `notebooks/layer0_ingestion/view_markets.ipynb` — market discovery
+
+The UMA arb bot still runs as a module:
+
 ```bash
-# Start the UMA arb bot (dry-run by default)
-python -m src.strategies.uma_arb_strategy
-
-# Debug signal generation
-python scripts/debug_uma_signal.py
-
-# Explore a market interactively
-python scripts/explore_market.py
-
-# Check EOA wallet allowances
-python scripts/check_allowances.py
+python -m src.strategies.uma_arb_strategy   # dry-run by default
 ```
 
 ## Key Concepts
