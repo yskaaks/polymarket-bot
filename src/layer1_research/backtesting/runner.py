@@ -58,6 +58,18 @@ def _parse_order_side(raw) -> str:
     return s
 
 
+def _parse_money(raw) -> float:
+    """Parse a commission/fee value that may be a float or a string like '5.01 USD'."""
+    if raw is None:
+        return 0.0
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    s = str(raw).strip()
+    if not s:
+        return 0.0
+    return float(s.split()[0])
+
+
 class BacktestRunner:
     """Orchestrates a backtest run: data -> engine -> result."""
 
@@ -65,6 +77,11 @@ class BacktestRunner:
         self._config = config
 
     def run(self, strategy_class: Type[PredictionMarketStrategy]) -> BacktestResult:
+        if self._config.data_mode != "trade":
+            raise NotImplementedError(
+                f"data_mode={self._config.data_mode!r} is not yet supported; "
+                "only 'trade' is wired up in the runner currently"
+            )
         catalog = ParquetDataCatalog(self._config.catalog_path)
 
         engine_config = BacktestEngineConfig(
@@ -238,21 +255,21 @@ class BacktestRunner:
                 side = _parse_order_side(fill["order_side"])
                 qty = float(fill["last_qty"])
                 px = float(fill["last_px"])
-                raw_fee = fill.get("commission", 0.0) or 0.0
-                fee = float(str(raw_fee).split()[0]) if str(raw_fee).strip() else 0.0
+                fee = _parse_money(fill.get("commission"))
                 ts = _to_datetime_utc(fill["ts_event"])
                 client_oid = fill.get("client_order_id")
 
                 signed = qty if side == "BUY" else -qty
                 new_position = position + signed
 
-                if position == 0.0 and new_position != 0.0:
+                if abs(position) < 1e-9 and not abs(new_position) < 1e-9:
                     entry_price = px
                     entry_ts = ts
                     entry_fees = fee
                     entry_client_oid = client_oid
                     entry_size_abs = abs(signed)
-                elif position != 0.0 and (position > 0) != (new_position > 0) and new_position != 0.0:
+                elif not abs(position) < 1e-9 and (position > 0) != (new_position > 0) and not abs(new_position) < 1e-9:
+                    # Flip: position crosses zero to the other side
                     trades_rows.append(self._build_trade_row(
                         inst_id, position > 0, entry_ts, ts,
                         entry_price, px, entry_size_abs,
@@ -263,7 +280,8 @@ class BacktestRunner:
                     entry_fees = 0.0
                     entry_client_oid = client_oid
                     entry_size_abs = abs(new_position)
-                elif new_position == 0.0 and position != 0.0:
+                elif abs(new_position) < 1e-9 and not abs(position) < 1e-9:
+                    # Full close: position returns to zero
                     trades_rows.append(self._build_trade_row(
                         inst_id, position > 0, entry_ts, ts,
                         entry_price, px, entry_size_abs,
@@ -275,17 +293,29 @@ class BacktestRunner:
                     entry_client_oid = None
                     entry_size_abs = 0.0
                 else:
-                    entry_fees += fee
                     if (position > 0) == (signed > 0):
+                        # Same-direction add — weight-avg entry price
+                        entry_fees += fee
                         total = entry_size_abs + abs(signed)
                         entry_price = (
                             (entry_price * entry_size_abs + px * abs(signed)) / total
                         )
                         entry_size_abs = total
+                    else:
+                        # Partial reduction (not a full close, not a flip) — emit a partial Trade
+                        reduced_size = abs(signed)
+                        trades_rows.append(self._build_trade_row(
+                            inst_id, position > 0, entry_ts, ts,
+                            entry_price, px, reduced_size,
+                            entry_fees + fee, entry_client_oid, signals_df,
+                        ))
+                        entry_size_abs -= reduced_size
+                        entry_fees = 0.0
+                        # entry_price, entry_ts, entry_client_oid stay unchanged
 
                 position = new_position
 
-            if position != 0.0 and entry_ts is not None:
+            if not abs(position) < 1e-9 and entry_ts is not None:
                 trades_rows.append(self._build_trade_row(
                     inst_id, position > 0, entry_ts, None,
                     entry_price, None, entry_size_abs,

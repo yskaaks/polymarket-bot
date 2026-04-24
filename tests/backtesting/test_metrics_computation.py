@@ -95,8 +95,8 @@ def test_fee_drag_uses_abs_pnl():
     r = _make_result(trades_rows=trades)
     m = compute_metrics(r)
     assert m.total_fees == pytest.approx(5.0)
-    # fee_drag = fees / abs(gross_pnl) = 5 / 10 = 0.5 (50%)
-    assert m.fee_drag_pct == pytest.approx(0.5)
+    # fee_drag = fees / abs(gross_pnl) = 5 / 10 = 0.5 → stored as 50.0 (percent)
+    assert m.fee_drag_pct == pytest.approx(50.0)
 
 
 def test_total_return_from_equity_curve():

@@ -22,7 +22,7 @@ def print_report(metrics: BacktestMetrics, top_n_markets: int = 5):
         print(f"  Avg Hold Time:       {str(metrics.avg_hold_time):>12}")
     print(border)
     print(f"  Total Fees:          ${metrics.total_fees:>11,.2f}")
-    print(f"  Fee Drag:            {metrics.fee_drag_pct:>12.1%}")
+    print(f"  Fee Drag:            {metrics.fee_drag_pct:>11.1f}%")
     print(f"  Avg Slippage:        {metrics.avg_slippage_bps:>10.1f} bps")
     print(border)
     print(f"  Avg Edge @ Order:    {metrics.avg_edge_at_order:>12.4f}")

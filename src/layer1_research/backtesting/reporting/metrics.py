@@ -142,7 +142,7 @@ def compute_metrics(result: "BacktestResult") -> BacktestMetrics:
 
     total_fees = float(trades["fees"].sum())
     gross_pnl = float(trades["gross_pnl"].sum())
-    fee_drag_pct = fee_drag(total_fees, gross_pnl)
+    fee_drag_pct = fee_drag(total_fees, gross_pnl) * 100.0
 
     avg_slippage_bps = float(trades["slippage_bps"].mean()) if total_trades else 0.0
 
