@@ -212,3 +212,36 @@ def test_plot_methods_return_figures():
     assert r.plot_pnl_histogram() is not None
     assert r.plot_edge_calibration() is not None
     assert r.plot_per_market_pnl() is not None
+
+
+def test_to_mlflow_roundtrip(tmp_path, monkeypatch):
+    """BacktestResult.to_mlflow writes artifacts; from_mlflow reads them back."""
+    import mlflow
+    import pandas as pd
+    from src.layer1_research.backtesting.results import BacktestResult
+    from src.layer1_research.backtesting.config import BacktestConfig
+
+    config = BacktestConfig(
+        catalog_path="data/catalog",
+        start=datetime(2024, 6, 1, tzinfo=timezone.utc),
+        end=datetime(2024, 6, 30, tzinfo=timezone.utc),
+        strategy_name="mlflow_rt", starting_capital=10_000.0, data_mode="trade",
+    )
+    account = pd.DataFrame(
+        {"total": ["10000.00 USD", "10500.00 USD"]},
+        index=pd.to_datetime(["2024-06-01T00Z", "2024-06-30T00Z"], utc=True),
+    )
+    result = BacktestResult(
+        config=config, fills=pd.DataFrame(), positions=pd.DataFrame(),
+        account=account, instruments=[], analyzer_stats={"Sharpe Ratio": 1.5},
+        signals=pd.DataFrame(), trades=pd.DataFrame(),
+    )
+
+    tracking_uri = f"sqlite:///{tmp_path}/mlflow.db"
+    mlflow.set_tracking_uri(tracking_uri)
+    run_id = result.to_mlflow(run_name="test-run", experiment="corr-test")
+    assert run_id
+
+    reloaded = BacktestResult.from_mlflow(run_id, tracking_uri=tracking_uri)
+    assert reloaded.config.strategy_name == "mlflow_rt"
+    assert float(reloaded.equity_curve.iloc[-1]) == pytest.approx(10_500.0)

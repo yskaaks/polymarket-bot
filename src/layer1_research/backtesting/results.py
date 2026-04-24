@@ -187,3 +187,128 @@ class BacktestResult:
     def plot_per_market_pnl(self, ax=None, top_n: int = 20):
         from src.layer1_research.backtesting.reporting.charts import plot_per_market_pnl
         return plot_per_market_pnl(self, ax=ax, top_n=top_n)
+
+    def to_mlflow(self, run_name: Optional[str] = None,
+                  experiment: str = "polymarket-backtests") -> str:
+        """Log this result to MLflow. Returns the run_id."""
+        import json
+        import tempfile
+        from pathlib import Path
+
+        import mlflow
+
+        mlflow.set_experiment(experiment)
+        metrics = self.metrics()
+        with mlflow.start_run(run_name=run_name) as run:
+            # Params: config + analyzer keys (stringified)
+            mlflow.log_params({
+                "strategy": self.config.strategy_name,
+                "start": self.config.start.isoformat(),
+                "end": self.config.end.isoformat(),
+                "starting_capital": self.config.starting_capital,
+                "data_mode": self.config.data_mode,
+                "fee_rate_bps": self.config.fee_rate_bps,
+                "position_sizer": self.config.position_sizer,
+            })
+            if self.config.strategy_params:
+                mlflow.log_params({
+                    f"strategy.{k}": v for k, v in self.config.strategy_params.items()
+                })
+
+            mlflow.log_metrics({
+                "total_return_pct": metrics.total_return_pct,
+                "sharpe_ratio": metrics.sharpe_ratio,
+                "sortino_ratio": metrics.sortino_ratio,
+                "max_drawdown_pct": metrics.max_drawdown_pct,
+                "calmar_ratio": metrics.calmar_ratio,
+                "win_rate": metrics.win_rate,
+                "total_trades": float(metrics.total_trades),
+                "total_fees": metrics.total_fees,
+                "fee_drag_pct": metrics.fee_drag_pct,
+                "avg_slippage_bps": metrics.avg_slippage_bps,
+                "avg_edge_at_order": metrics.avg_edge_at_order,
+                "edge_realization_rate": metrics.edge_realization_rate,
+            })
+
+            _SKIP_COLS = {"info", "margins"}
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+
+                def _write_and_log(df, name):
+                    if df is None or df.empty:
+                        return
+                    out = df.drop(columns=_SKIP_COLS & set(df.columns),
+                                  errors="ignore")
+                    p = tmp_path / name
+                    out.to_parquet(p)
+                    mlflow.log_artifact(str(p))
+
+                _write_and_log(self.fills, "fills.parquet")
+                _write_and_log(self.positions, "positions.parquet")
+                _write_and_log(self.account, "account.parquet")
+                _write_and_log(self.signals, "signals.parquet")
+                _write_and_log(self.trades, "trades.parquet")
+
+                # Save config as JSON
+                cfg_path = tmp_path / "config.json"
+                cfg_path.write_text(json.dumps({
+                    "catalog_path": self.config.catalog_path,
+                    "start": self.config.start.isoformat(),
+                    "end": self.config.end.isoformat(),
+                    "strategy_name": self.config.strategy_name,
+                    "starting_capital": self.config.starting_capital,
+                    "data_mode": self.config.data_mode,
+                    "fee_rate_bps": self.config.fee_rate_bps,
+                    "position_sizer": self.config.position_sizer,
+                    "strategy_params": self.config.strategy_params,
+                }))
+                mlflow.log_artifact(str(cfg_path))
+
+            return run.info.run_id
+
+    @classmethod
+    def from_mlflow(cls, run_id: str,
+                    tracking_uri: Optional[str] = None) -> "BacktestResult":
+        """Reload a BacktestResult from an MLflow run's artifacts."""
+        import json
+        from datetime import datetime
+        import mlflow
+        from src.layer1_research.backtesting.config import BacktestConfig
+
+        if tracking_uri:
+            mlflow.set_tracking_uri(tracking_uri)
+
+        client = mlflow.tracking.MlflowClient()
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            local = client.download_artifacts(run_id, "", tmp)
+            root = Path(local)
+
+            cfg = json.loads((root / "config.json").read_text())
+            config = BacktestConfig(
+                catalog_path=cfg["catalog_path"],
+                start=datetime.fromisoformat(cfg["start"]),
+                end=datetime.fromisoformat(cfg["end"]),
+                strategy_name=cfg["strategy_name"],
+                starting_capital=cfg["starting_capital"],
+                data_mode=cfg["data_mode"],
+                fee_rate_bps=cfg["fee_rate_bps"],
+                position_sizer=cfg["position_sizer"],
+                strategy_params=cfg.get("strategy_params", {}),
+            )
+
+            def _load(name):
+                p = root / name
+                return pd.read_parquet(p) if p.exists() else pd.DataFrame()
+
+            return cls(
+                config=config,
+                fills=_load("fills.parquet"),
+                positions=_load("positions.parquet"),
+                account=_load("account.parquet"),
+                instruments=[],  # not restorable from artifacts
+                analyzer_stats={},  # scalar metrics re-derived from equity curve
+                signals=_load("signals.parquet"),
+                trades=_load("trades.parquet"),
+            )
