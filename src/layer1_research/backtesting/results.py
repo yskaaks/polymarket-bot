@@ -13,6 +13,7 @@ import pandas as pd
 
 if TYPE_CHECKING:
     from src.layer1_research.backtesting.config import BacktestConfig
+    from src.layer1_research.backtesting.reporting.metrics import BacktestMetrics
 
 
 @dataclass(frozen=True)
@@ -157,3 +158,12 @@ class BacktestResult:
         # the previous balance.
         self.equity_curve = self.account["total"].astype(float).copy()
         self.equity_curve.name = "equity_usd"
+
+        self._metrics_cache = None
+
+    def metrics(self) -> "BacktestMetrics":
+        """Return the BacktestMetrics derived from this result. Memoized."""
+        if getattr(self, "_metrics_cache", None) is None:
+            from src.layer1_research.backtesting.reporting.metrics import compute_metrics
+            self._metrics_cache = compute_metrics(self)
+        return self._metrics_cache

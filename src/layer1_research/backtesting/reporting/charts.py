@@ -1,11 +1,13 @@
 """Chart generation for backtest results. Only imported when --charts flag is used."""
 from pathlib import Path
 from typing import Optional
-from src.layer1_research.backtesting.reporting.metrics import BacktestSummary
+from src.layer1_research.backtesting.reporting.metrics import BacktestMetrics
 
 
 def generate_charts(
-    summary: BacktestSummary,
+    summary: BacktestMetrics,
+    strategy_name: str = "backtest",
+    starting_capital: float = 0.0,
     equity_curve: Optional[list[tuple[str, float]]] = None,
     trade_returns: Optional[list[float]] = None,
     calibration_data: Optional[list[tuple[float, int]]] = None,
@@ -14,17 +16,17 @@ def generate_charts(
 ):
     import matplotlib.pyplot as plt
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    prefix = f"{output_dir}/{summary.strategy_name}"
+    prefix = f"{output_dir}/{strategy_name}"
 
     if equity_curve:
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), height_ratios=[3, 1])
         dates = [e[0] for e in equity_curve]
         values = [e[1] for e in equity_curve]
         ax1.plot(dates, values, linewidth=1.5)
-        ax1.set_title(f"{summary.strategy_name} — Equity Curve")
+        ax1.set_title(f"{strategy_name} — Equity Curve")
         ax1.set_ylabel("Portfolio Value (USDC)")
-        ax1.axhline(y=summary.starting_capital, color="gray", linestyle="--", alpha=0.5)
-        peak = summary.starting_capital
+        ax1.axhline(y=starting_capital, color="gray", linestyle="--", alpha=0.5)
+        peak = starting_capital
         drawdowns = []
         for v in values:
             peak = max(peak, v)
@@ -39,13 +41,13 @@ def generate_charts(
 
     if summary.per_market:
         fig, ax = plt.subplots(figsize=(10, max(4, len(summary.per_market) * 0.4)))
-        markets = sorted(summary.per_market.items(), key=lambda x: x[1].get("pnl", 0))
+        markets = sorted(summary.per_market.items(), key=lambda x: x[1].net_pnl)
         names = [m[0][:40] for m in markets]
-        pnls = [m[1].get("pnl", 0) for m in markets]
+        pnls = [m[1].net_pnl for m in markets]
         colors = ["green" if p >= 0 else "red" for p in pnls]
         ax.barh(names, pnls, color=colors, alpha=0.7)
         ax.set_xlabel("P&L (USDC)")
-        ax.set_title(f"{summary.strategy_name} — P&L by Market")
+        ax.set_title(f"{strategy_name} — P&L by Market")
         plt.tight_layout()
         plt.savefig(f"{prefix}_per_market.png", dpi=150)
         plt.close()
@@ -57,7 +59,7 @@ def generate_charts(
         ax.axvline(x=0, color="red", linestyle="--", alpha=0.5)
         ax.set_xlabel("Return per Trade")
         ax.set_ylabel("Frequency")
-        ax.set_title(f"{summary.strategy_name} — Returns Distribution")
+        ax.set_title(f"{strategy_name} — Returns Distribution")
         plt.tight_layout()
         plt.savefig(f"{prefix}_returns_dist.png", dpi=150)
         plt.close()
@@ -80,7 +82,7 @@ def generate_charts(
         ax.scatter(bin_means_pred, bin_means_actual, s=80, zorder=5)
         ax.set_xlabel("Predicted Probability")
         ax.set_ylabel("Actual Win Rate")
-        ax.set_title(f"{summary.strategy_name} — Calibration")
+        ax.set_title(f"{strategy_name} — Calibration")
         ax.legend()
         plt.tight_layout()
         plt.savefig(f"{prefix}_calibration.png", dpi=150)
@@ -92,7 +94,7 @@ def generate_charts(
         values = [e[1] for e in exposure_over_time]
         ax.fill_between(range(len(values)), values, alpha=0.4)
         ax.set_ylabel("Capital Deployed (USDC)")
-        ax.set_title(f"{summary.strategy_name} — Exposure Over Time")
+        ax.set_title(f"{strategy_name} — Exposure Over Time")
         plt.tight_layout()
         plt.savefig(f"{prefix}_exposure.png", dpi=150)
         plt.close()
