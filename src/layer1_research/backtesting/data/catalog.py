@@ -16,6 +16,11 @@ from src.layer1_research.backtesting.data.instruments import POLYMARKET_VENUE, c
 from src.layer1_research.backtesting.data.loaders.base import DataLoader
 from src.layer1_research.backtesting.data.models import MarketFilter
 
+# Smallest representable trade size given the instrument's size_precision=1
+# (see data/instruments.py). Trades below this round to 0 at precision=1
+# and would be rejected by Nautilus's Quantity constructor.
+MIN_TRADE_SIZE_PRECISION = 0.05
+
 
 @dataclass
 class CatalogBuildResult:
@@ -65,8 +70,8 @@ def build_catalog(loader: DataLoader, catalog_path: str,
             instrument_id = InstrumentId(symbol=Symbol(token_id), venue=POLYMARKET_VENUE)
             batch = []
             for i, raw_trade in enumerate(loader.get_trades(token_id)):
-                if raw_trade.size < 0.05:
-                    continue  # Too small to represent at precision=1
+                if raw_trade.size < MIN_TRADE_SIZE_PRECISION:
+                    continue
                 ts_ns = int(raw_trade.timestamp.timestamp() * 1e9)
                 aggressor_side = AggressorSide.BUYER if raw_trade.side == "BUY" else AggressorSide.SELLER
                 tick = TradeTick(
