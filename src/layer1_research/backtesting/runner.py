@@ -1,27 +1,29 @@
-"""Backtest runner: wires config, engine, strategy, and reporting together."""
-import inspect
-import tempfile
-from pathlib import Path
+"""Backtest runner: orchestrates engine + strategy; returns BacktestResult.
+
+No metric computation, no MLflow calls — those live in reporting/metrics.py
+and on the BacktestResult object itself (result.to_mlflow()).
+"""
+from __future__ import annotations
+
+from decimal import Decimal
 from typing import Type
 
-import mlflow
-from decimal import Decimal
+import pandas as pd
 
 from nautilus_trader.backtest.engine import BacktestEngine, BacktestEngineConfig
 from nautilus_trader.backtest.models import MakerTakerFeeModel
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.risk.config import RiskEngineConfig
 from nautilus_trader.model.currencies import USD
-from nautilus_trader.model.enums import AccountType, AssetClass, OmsType
-from nautilus_trader.model.identifiers import InstrumentId, Symbol, Venue
+from nautilus_trader.model.enums import AccountType, OmsType
+from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.model.instruments import BinaryOption
-from nautilus_trader.model.objects import Money, Price, Quantity
+from nautilus_trader.model.objects import Money
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 from src.layer1_research.backtesting.config import BacktestConfig
 from src.layer1_research.backtesting.execution.fill_model import PredictionMarketFillModel
-from src.layer1_research.backtesting.reporting.cli_report import print_report
-from src.layer1_research.backtesting.reporting.metrics import BacktestSummary, fee_drag
+from src.layer1_research.backtesting.results import BacktestResult
 from src.layer1_research.backtesting.strategies.base import (
     PredictionMarketStrategy, PredictionMarketStrategyConfig,
 )
@@ -29,13 +31,40 @@ from src.layer1_research.backtesting.strategies.base import (
 POLYMARKET_VENUE = Venue("POLYMARKET")
 
 
+def _to_datetime_utc(ts):
+    """Normalize a timestamp to a tz-aware datetime in UTC.
+
+    Nautilus fill rows come through with ts_event as either an int-ns value,
+    a pandas Timestamp, or a python datetime depending on report version.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    if isinstance(ts, _dt):
+        return ts if ts.tzinfo else ts.replace(tzinfo=_tz.utc)
+    if isinstance(ts, (int, float)):
+        return _dt.fromtimestamp(ts / 1e9, tz=_tz.utc)
+    # pandas Timestamp
+    py = getattr(ts, "to_pydatetime", None)
+    if callable(py):
+        dt = py()
+        return dt if dt.tzinfo else dt.replace(tzinfo=_tz.utc)
+    raise TypeError(f"cannot convert ts to datetime: {ts!r} ({type(ts).__name__})")
+
+
+def _parse_order_side(raw) -> str:
+    """Return 'BUY' or 'SELL' from any reasonable Nautilus order_side cell."""
+    s = str(raw).upper().split(".")[-1].strip()
+    if s not in ("BUY", "SELL"):
+        raise ValueError(f"unexpected order_side value: {raw!r}")
+    return s
+
+
 class BacktestRunner:
-    """Orchestrates a backtest run from config to results."""
+    """Orchestrates a backtest run: data -> engine -> result."""
 
     def __init__(self, config: BacktestConfig):
         self._config = config
 
-    def run(self, strategy_class: Type[PredictionMarketStrategy]) -> BacktestSummary:
+    def run(self, strategy_class: Type[PredictionMarketStrategy]) -> BacktestResult:
         catalog = ParquetDataCatalog(self._config.catalog_path)
 
         engine_config = BacktestEngineConfig(
@@ -44,12 +73,10 @@ class BacktestRunner:
         )
         engine = BacktestEngine(config=engine_config)
 
-        # Build fill model from config (None = no slippage)
         fill_model = None
         if self._config.fill_model is not None:
             fill_model = PredictionMarketFillModel(self._config.fill_model)
 
-        # Add simulated venue with fee + fill models
         engine.add_venue(
             venue=POLYMARKET_VENUE,
             oms_type=OmsType.NETTING,
@@ -59,56 +86,74 @@ class BacktestRunner:
             fill_model=fill_model,
         )
 
-        # Load instruments from catalog, overriding fees from config
+        instruments = self._load_instruments(catalog)
+        for inst in instruments:
+            engine.add_instrument(inst)
+
+        instrument_id_strs = [str(inst.id) for inst in instruments]
+        ticks = catalog.trade_ticks(instrument_ids=instrument_id_strs)
+        start_ns = int(self._config.start.timestamp() * 1e9)
+        end_ns = int(self._config.end.timestamp() * 1e9)
+        filtered_ticks = [t for t in ticks if start_ns <= t.ts_event <= end_ns]
+        if filtered_ticks:
+            engine.add_data(filtered_ticks)
+
+        strategy = self._build_strategy(strategy_class, instrument_id_strs)
+        engine.add_strategy(strategy)
+
+        engine.run()
+
+        fills = engine.trader.generate_fills_report()
+        positions = engine.trader.generate_positions_report()
+        account = engine.trader.generate_account_report(POLYMARKET_VENUE)
+
+        analyzer_stats = self._collect_analyzer_stats(engine)
+        signals_df = self._signal_log_to_df(strategy._signal_log)
+        trades_df = self._fills_to_trades(fills, signals_df)
+
+        result = BacktestResult(
+            config=self._config,
+            fills=fills, positions=positions, account=account,
+            instruments=instruments,
+            analyzer_stats=analyzer_stats,
+            signals=signals_df,
+            trades=trades_df,
+        )
+        engine.dispose()
+        return result
+
+    # ---- helpers ------------------------------------------------------
+
+    def _load_instruments(self, catalog: ParquetDataCatalog) -> list[BinaryOption]:
         fee_rate = Decimal(str(self._config.fee_rate_bps / 10_000))
-        raw_instruments = catalog.instruments()
+        raw = catalog.instruments()
         if self._config.markets:
-            raw_instruments = [
-                inst for inst in raw_instruments
+            raw = [
+                inst for inst in raw
                 if any(m in str(inst.id) for m in self._config.markets)
             ]
-
-        instruments = []
-        for inst in raw_instruments:
-            # Rebuild with correct fee rate (catalog stores maker_fee=0)
-            rebuilt = BinaryOption(
-                instrument_id=inst.id,
-                raw_symbol=inst.raw_symbol,
-                asset_class=inst.asset_class,
-                currency=inst.quote_currency,
+        rebuilt = []
+        for inst in raw:
+            rebuilt.append(BinaryOption(
+                instrument_id=inst.id, raw_symbol=inst.raw_symbol,
+                asset_class=inst.asset_class, currency=inst.quote_currency,
                 price_precision=inst.price_precision,
                 size_precision=inst.size_precision,
                 price_increment=inst.price_increment,
                 size_increment=inst.size_increment,
                 activation_ns=inst.activation_ns,
                 expiration_ns=inst.expiration_ns,
-                ts_event=inst.ts_event,
-                ts_init=inst.ts_init,
-                maker_fee=fee_rate,
-                taker_fee=fee_rate,
+                ts_event=inst.ts_event, ts_init=inst.ts_init,
+                maker_fee=fee_rate, taker_fee=fee_rate,
                 outcome=inst.outcome,
-            )
-            instruments.append(rebuilt)
-            engine.add_instrument(rebuilt)
+            ))
+        return rebuilt
 
-        # Load trade ticks, passing instrument_ids as strings
-        instrument_id_strs = [str(inst.id) for inst in instruments]
-        ticks = catalog.trade_ticks(instrument_ids=instrument_id_strs)
-
-        # Filter by date range
-        start_ns = int(self._config.start.timestamp() * 1e9)
-        end_ns = int(self._config.end.timestamp() * 1e9)
-        filtered_ticks = [
-            t for t in ticks
-            if start_ns <= t.ts_event <= end_ns
-        ]
-
-        if filtered_ticks:
-            engine.add_data(filtered_ticks)
-
-        # Configure strategy — use the strategy's own config class if it
-        # declares one via __init__ type hints, so subclass-specific fields
-        # (e.g. FairValueMRConfig.exit_threshold) are available.
+    def _build_strategy(
+        self, strategy_class: Type[PredictionMarketStrategy],
+        instrument_id_strs: list[str],
+    ) -> PredictionMarketStrategy:
+        import inspect
         init_sig = inspect.signature(strategy_class.__init__)
         config_param = init_sig.parameters.get("config")
         if config_param and config_param.annotation is not inspect.Parameter.empty:
@@ -116,139 +161,182 @@ class BacktestRunner:
         else:
             config_cls = PredictionMarketStrategyConfig
 
-        base_kwargs = dict(
+        kwargs = dict(
             instrument_ids=instrument_id_strs,
             fee_rate_bps=self._config.fee_rate_bps,
             sizer_mode=self._config.position_sizer,
         )
-        base_kwargs.update(self._config.strategy_params)
-        strategy_config = config_cls(**base_kwargs)
-        strategy = strategy_class(config=strategy_config)
-        engine.add_strategy(strategy)
+        kwargs.update(self._config.strategy_params)
+        return strategy_class(config=config_cls(**kwargs))
 
-        # Run
-        engine.run()
+    def _collect_analyzer_stats(self, engine: BacktestEngine) -> dict:
+        """Pull scalar perf stats from Nautilus's backtest result object.
 
-        # Collect results + MLflow tracking
-        fills_report = engine.trader.generate_fills_report()
-        positions_report = engine.trader.generate_positions_report()
-        account_report = engine.trader.generate_account_report(POLYMARKET_VENUE)
-
-        summary = self._build_summary(fills_report, positions_report, account_report)
-        print_report(summary)
-
-        self._log_to_mlflow(summary, fills_report, positions_report, account_report)
-
-        engine.dispose()
-        return summary
-
-    def _build_summary(self, fills_report, positions_report, account_report) -> BacktestSummary:
-        total_trades = len(fills_report) if fills_report is not None and not fills_report.empty else 0
-
-        final_equity = self._config.starting_capital
-        total_fees = 0.0
-
+        We grab the full dict; reporting.metrics decides which keys to surface.
+        engine.get_result() exposes stats_pnls and stats_returns as dicts.
+        """
         try:
-            if account_report is not None and not account_report.empty:
-                last_row = account_report.iloc[-1]
-                balance = last_row.get("total", self._config.starting_capital)
-                final_equity = float(balance)
+            engine_result = engine.get_result()
+        except Exception as e:
+            raise RuntimeError(
+                f"failed to get engine result for analyzer stats: {e}"
+            ) from e
 
-            if fills_report is not None and "commission" in fills_report.columns:
-                # commission may be "5.01 USD" strings — extract numeric part
-                total_fees = float(fills_report["commission"].apply(
-                    lambda x: float(str(x).split()[0]) if str(x).strip() else 0.0
-                ).sum())
-        except Exception:
-            pass
+        stats = {}
+        pnls = engine_result.stats_pnls or {}
+        stats.update(pnls)
+        returns = engine_result.stats_returns or {}
+        stats.update(returns)
+        return stats
 
-        total_return_pct = (
-            (final_equity - self._config.starting_capital)
-            / self._config.starting_capital * 100
-        )
+    def _signal_log_to_df(self, log: list) -> pd.DataFrame:
+        if not log:
+            return pd.DataFrame(columns=[
+                "ts", "instrument_id", "direction", "market_price",
+                "confidence", "target_price", "size", "client_order_id",
+                "edge_at_order",
+            ])
+        rows = [{
+            "ts": s.ts, "instrument_id": s.instrument_id,
+            "direction": s.direction, "market_price": s.market_price,
+            "confidence": s.confidence, "target_price": s.target_price,
+            "size": s.size, "client_order_id": s.client_order_id,
+            "edge_at_order": s.edge_at_order,
+        } for s in log]
+        return pd.DataFrame(rows).set_index("ts").sort_index()
 
-        win_rate = 0.0
-        try:
-            if positions_report is not None and not positions_report.empty:
-                if "realized_pnl" in positions_report.columns:
-                    # realized_pnl may be "810.47 USD" strings — extract numeric part
-                    pnl = positions_report["realized_pnl"].apply(
-                        lambda x: float(str(x).split()[0]) if str(x).strip() else 0.0
-                    )
-                    closed = pnl[pnl != 0]
-                    if len(closed) > 0:
-                        wins = (closed > 0).sum()
-                        win_rate = wins / len(closed)
-        except Exception:
-            pass
+    def _fills_to_trades(
+        self, fills: pd.DataFrame, signals_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Pair entry/exit fills per instrument into round-trip Trade rows.
 
-        gross_pnl = final_equity - self._config.starting_capital + total_fees
+        Uses OmsType.NETTING: a position opens on the first fill and closes
+        when quantity returns to zero. We walk fills in time order per
+        instrument and emit one Trade per (entry, exit) cycle.
+        """
+        cols = [
+            "instrument_id", "direction", "entry_ts", "exit_ts",
+            "entry_price", "exit_price", "size", "fees",
+            "gross_pnl", "net_pnl", "edge_at_entry", "slippage_bps",
+            "signal_confidence", "realized_edge",
+        ]
+        if fills is None or fills.empty:
+            return pd.DataFrame(columns=cols)
 
-        return BacktestSummary(
-            strategy_name=self._config.strategy_name,
-            start=self._config.start.strftime("%Y-%m-%d"),
-            end=self._config.end.strftime("%Y-%m-%d"),
-            starting_capital=self._config.starting_capital,
-            final_equity=final_equity,
-            total_return_pct=total_return_pct,
-            sharpe_ratio=0.0,
-            max_drawdown_pct=0.0,
-            win_rate=win_rate,
-            total_trades=total_trades,
-            total_fees=total_fees,
-            brier=None,
-            fee_drag_pct=fee_drag(total_fees, gross_pnl),
-        )
+        f = fills.copy().sort_values("ts_event")
+        trades_rows = []
 
-    def _log_to_mlflow(self, summary: BacktestSummary, fills_report, positions_report, account_report):
-        """Log backtest run to MLflow: metrics, params, and trade artifacts."""
-        mlflow.set_tracking_uri(f"sqlite:///{Path(self._config.catalog_path).parent / 'mlflow.db'}")
-        mlflow.set_experiment("polymarket-backtests")
+        for inst_id, group in f.groupby("instrument_id"):
+            position = 0.0
+            entry_price = None
+            entry_ts = None
+            entry_fees = 0.0
+            entry_client_oid = None
+            entry_size_abs = 0.0
 
-        with mlflow.start_run(run_name=f"{summary.strategy_name}_{summary.start}_{summary.end}"):
-            # Log config as params
-            mlflow.log_params({
-                "strategy": summary.strategy_name,
-                "start": summary.start,
-                "end": summary.end,
-                "starting_capital": self._config.starting_capital,
-                "data_mode": self._config.data_mode,
-                "fee_rate_bps": self._config.fee_rate_bps,
-                "position_sizer": self._config.position_sizer,
-            })
-            if self._config.strategy_params:
-                mlflow.log_params({
-                    f"strategy.{k}": v for k, v in self._config.strategy_params.items()
-                })
+            for _, fill in group.iterrows():
+                side = _parse_order_side(fill["order_side"])
+                qty = float(fill["last_qty"])
+                px = float(fill["last_px"])
+                raw_fee = fill.get("commission", 0.0) or 0.0
+                fee = float(str(raw_fee).split()[0]) if str(raw_fee).strip() else 0.0
+                ts = _to_datetime_utc(fill["ts_event"])
+                client_oid = fill.get("client_order_id")
 
-            # Log metrics
-            mlflow.log_metrics({
-                "final_equity": summary.final_equity,
-                "total_return_pct": summary.total_return_pct,
-                "sharpe_ratio": summary.sharpe_ratio,
-                "max_drawdown_pct": summary.max_drawdown_pct,
-                "win_rate": summary.win_rate,
-                "total_trades": summary.total_trades,
-                "total_fees": summary.total_fees,
-                "fee_drag_pct": summary.fee_drag_pct,
-            })
+                signed = qty if side == "BUY" else -qty
+                new_position = position + signed
 
-            # Save fills, positions, account as parquet artifacts
-            # Drop columns that pyarrow can't serialize (empty structs, etc.)
-            drop_cols = {"info", "margins"}
-            with tempfile.TemporaryDirectory() as tmpdir:
-                artifacts_dir = Path(tmpdir)
-                if fills_report is not None and not fills_report.empty:
-                    fills_path = artifacts_dir / "fills.parquet"
-                    fills_report.drop(columns=drop_cols & set(fills_report.columns), errors="ignore").to_parquet(fills_path)
-                    mlflow.log_artifact(str(fills_path))
+                if position == 0.0 and new_position != 0.0:
+                    entry_price = px
+                    entry_ts = ts
+                    entry_fees = fee
+                    entry_client_oid = client_oid
+                    entry_size_abs = abs(signed)
+                elif position != 0.0 and (position > 0) != (new_position > 0) and new_position != 0.0:
+                    trades_rows.append(self._build_trade_row(
+                        inst_id, position > 0, entry_ts, ts,
+                        entry_price, px, entry_size_abs,
+                        entry_fees + fee, entry_client_oid, signals_df,
+                    ))
+                    entry_price = px
+                    entry_ts = ts
+                    entry_fees = 0.0
+                    entry_client_oid = client_oid
+                    entry_size_abs = abs(new_position)
+                elif new_position == 0.0 and position != 0.0:
+                    trades_rows.append(self._build_trade_row(
+                        inst_id, position > 0, entry_ts, ts,
+                        entry_price, px, entry_size_abs,
+                        entry_fees + fee, entry_client_oid, signals_df,
+                    ))
+                    entry_price = None
+                    entry_ts = None
+                    entry_fees = 0.0
+                    entry_client_oid = None
+                    entry_size_abs = 0.0
+                else:
+                    entry_fees += fee
+                    if (position > 0) == (signed > 0):
+                        total = entry_size_abs + abs(signed)
+                        entry_price = (
+                            (entry_price * entry_size_abs + px * abs(signed)) / total
+                        )
+                        entry_size_abs = total
 
-                if positions_report is not None and not positions_report.empty:
-                    positions_path = artifacts_dir / "positions.parquet"
-                    positions_report.drop(columns=drop_cols & set(positions_report.columns), errors="ignore").to_parquet(positions_path)
-                    mlflow.log_artifact(str(positions_path))
+                position = new_position
 
-                if account_report is not None and not account_report.empty:
-                    account_path = artifacts_dir / "account_history.parquet"
-                    account_report.drop(columns=drop_cols & set(account_report.columns), errors="ignore").to_parquet(account_path)
-                    mlflow.log_artifact(str(account_path))
+            if position != 0.0 and entry_ts is not None:
+                trades_rows.append(self._build_trade_row(
+                    inst_id, position > 0, entry_ts, None,
+                    entry_price, None, entry_size_abs,
+                    entry_fees, entry_client_oid, signals_df,
+                ))
+
+        if not trades_rows:
+            return pd.DataFrame(columns=cols)
+        return pd.DataFrame(trades_rows)[cols]
+
+    @staticmethod
+    def _build_trade_row(
+        inst_id, is_long, entry_ts, exit_ts, entry_px, exit_px, size,
+        fees, entry_client_oid, signals_df,
+    ) -> dict:
+        direction = "LONG" if is_long else "SHORT"
+        if exit_px is None:
+            gross = 0.0
+        elif is_long:
+            gross = (exit_px - entry_px) * size
+        else:
+            gross = (entry_px - exit_px) * size
+        net = gross - fees
+
+        edge_at_entry = 0.0
+        signal_confidence = 0.0
+        slippage_bps = 0.0
+        if signals_df is not None and not signals_df.empty and entry_client_oid is not None:
+            match = signals_df[signals_df["client_order_id"] == entry_client_oid]
+            if not match.empty:
+                row = match.iloc[0]
+                edge_at_entry = float(row["edge_at_order"])
+                signal_confidence = float(row["confidence"])
+                signal_price = float(row["market_price"])
+                if signal_price > 0:
+                    slippage_bps = (entry_px - signal_price) / signal_price * 10_000.0
+                    if not is_long:
+                        slippage_bps = -slippage_bps
+
+        realized_edge = None
+        if exit_px is not None:
+            realized_edge = (exit_px - entry_px) if is_long else (entry_px - exit_px)
+
+        return {
+            "instrument_id": str(inst_id),
+            "direction": direction,
+            "entry_ts": entry_ts, "exit_ts": exit_ts,
+            "entry_price": entry_px, "exit_price": exit_px,
+            "size": size, "fees": fees,
+            "gross_pnl": gross, "net_pnl": net,
+            "edge_at_entry": edge_at_entry, "slippage_bps": slippage_bps,
+            "signal_confidence": signal_confidence,
+            "realized_edge": realized_edge,
+        }
