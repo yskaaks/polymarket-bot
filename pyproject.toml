@@ -29,5 +29,7 @@ include = ["src*"]
 
 [dependency-groups]
 dev = [
+    "ipykernel>=7.2.0",
     "jupytext>=1.19.1",
+    "nbconvert>=7.17.1",
 ]
