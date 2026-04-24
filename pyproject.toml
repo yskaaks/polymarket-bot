@@ -26,3 +26,8 @@ backtesting = [
 
 [tool.setuptools.packages.find]
 include = ["src*"]
+
+[dependency-groups]
+dev = [
+    "jupytext>=1.19.1",
+]
