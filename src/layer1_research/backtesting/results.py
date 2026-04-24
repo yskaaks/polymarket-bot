@@ -167,3 +167,23 @@ class BacktestResult:
             from src.layer1_research.backtesting.reporting.metrics import compute_metrics
             self._metrics_cache = compute_metrics(self)
         return self._metrics_cache
+
+    def plot_equity_curve(self, ax=None):
+        from src.layer1_research.backtesting.reporting.charts import plot_equity_curve
+        return plot_equity_curve(self, ax=ax)
+
+    def plot_drawdown(self, ax=None):
+        from src.layer1_research.backtesting.reporting.charts import plot_drawdown
+        return plot_drawdown(self, ax=ax)
+
+    def plot_pnl_histogram(self, ax=None, bins: int = 40):
+        from src.layer1_research.backtesting.reporting.charts import plot_pnl_histogram
+        return plot_pnl_histogram(self, ax=ax, bins=bins)
+
+    def plot_edge_calibration(self, ax=None):
+        from src.layer1_research.backtesting.reporting.charts import plot_edge_calibration
+        return plot_edge_calibration(self, ax=ax)
+
+    def plot_per_market_pnl(self, ax=None, top_n: int = 20):
+        from src.layer1_research.backtesting.reporting.charts import plot_per_market_pnl
+        return plot_per_market_pnl(self, ax=ax, top_n=top_n)

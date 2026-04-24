@@ -178,3 +178,37 @@ def test_backtest_result_equity_curve_empty_account_raises():
             instruments=[], analyzer_stats={},
             signals=pd.DataFrame(), trades=pd.DataFrame(),
         )
+
+
+def test_plot_methods_return_figures():
+    """Smoke: each plot_* returns a matplotlib Figure without raising."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt  # noqa: F401
+
+    from src.layer1_research.backtesting.results import BacktestResult
+    from src.layer1_research.backtesting.config import BacktestConfig
+
+    config = BacktestConfig(
+        catalog_path="data/catalog",
+        start=datetime(2024, 6, 1, tzinfo=timezone.utc),
+        end=datetime(2024, 6, 30, tzinfo=timezone.utc),
+        strategy_name="smoke", starting_capital=10_000.0, data_mode="trade",
+    )
+    import pandas as pd
+    account = pd.DataFrame(
+        {"total": ["10000.00 USD", "10200.00 USD", "9800.00 USD"]},
+        index=pd.to_datetime(
+            ["2024-06-01T00Z", "2024-06-15T00Z", "2024-06-30T00Z"], utc=True,
+        ),
+    )
+    r = BacktestResult(
+        config=config, fills=pd.DataFrame(), positions=pd.DataFrame(),
+        account=account, instruments=[], analyzer_stats={},
+        signals=pd.DataFrame(), trades=pd.DataFrame(),
+    )
+    assert r.plot_equity_curve() is not None
+    assert r.plot_drawdown() is not None
+    assert r.plot_pnl_histogram() is not None
+    assert r.plot_edge_calibration() is not None
+    assert r.plot_per_market_pnl() is not None
