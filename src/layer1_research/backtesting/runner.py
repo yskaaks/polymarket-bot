@@ -340,20 +340,34 @@ class BacktestRunner:
             gross = (entry_px - exit_px) * size
         net = gross - fees
 
+        # Match the entry to a SignalSnapshot. Nautilus's fills report does
+        # not carry client_order_id, so we match on (instrument_id, direction,
+        # ts <= entry_ts) — the latest *order-submitting* signal (i.e. one
+        # whose client_order_id is not null; size>0 signals that the strategy
+        # actually translated into an order) for this instrument at-or-before
+        # the entry fill.
         edge_at_entry = 0.0
         signal_confidence = 0.0
         slippage_bps = 0.0
-        if signals_df is not None and not signals_df.empty and entry_client_oid is not None:
-            match = signals_df[signals_df["client_order_id"] == entry_client_oid]
-            if not match.empty:
-                row = match.iloc[0]
+        if signals_df is not None and not signals_df.empty:
+            wanted_dir = "BUY" if is_long else "SELL"
+            inst_match = signals_df[
+                (signals_df["instrument_id"] == str(inst_id))
+                & (signals_df["direction"] == wanted_dir)
+                & (signals_df["client_order_id"].notna())
+                & (signals_df.index <= entry_ts)
+            ]
+            if not inst_match.empty:
+                row = inst_match.iloc[-1]
                 edge_at_entry = float(row["edge_at_order"])
                 signal_confidence = float(row["confidence"])
                 signal_price = float(row["market_price"])
                 if signal_price > 0:
+                    # Plain price-drift: positive = filled at higher price than
+                    # the strategy saw at signal time. Without a fill model,
+                    # this reflects market drift between decision and fill,
+                    # not "slippage" in the traditional sense.
                     slippage_bps = (entry_px - signal_price) / signal_price * 10_000.0
-                    if not is_long:
-                        slippage_bps = -slippage_bps
 
         realized_edge = None
         if exit_px is not None:

@@ -87,25 +87,64 @@ def _pick(stats: dict, aliases: tuple) -> Optional[float]:
     return None
 
 
+def _sharpe_sortino_mdd_from_equity(equity: pd.Series) -> tuple[float, float, float]:
+    """Compute (annualized Sharpe, annualized Sortino, max drawdown %)
+    directly from the equity curve.
+
+    More reliable than Nautilus's returns analyzer (which can return all-nan
+    on sparse / event-driven equity series). Returns are computed as
+    pct_change between consecutive equity samples; we annualize against an
+    estimated periods-per-year derived from the timestamp index.
+    """
+    eq = equity.dropna()
+    if len(eq) < 2:
+        return 0.0, 0.0, 0.0
+
+    rets = eq.pct_change().dropna()
+    if rets.empty or rets.std() == 0:
+        sharpe = 0.0
+        sortino = 0.0
+    else:
+        # Annualization: estimate periods-per-year from the actual timeline.
+        if isinstance(eq.index, pd.DatetimeIndex) and len(eq) > 1:
+            span_seconds = (eq.index[-1] - eq.index[0]).total_seconds()
+            if span_seconds > 0:
+                samples_per_year = len(rets) * (365.25 * 24 * 3600) / span_seconds
+            else:
+                samples_per_year = 252.0
+        else:
+            samples_per_year = 252.0
+        ann = samples_per_year ** 0.5
+        mean = float(rets.mean())
+        std = float(rets.std())
+        sharpe = (mean / std) * ann if std > 0 else 0.0
+        downside = rets[rets < 0]
+        downside_std = float(downside.std()) if len(downside) > 1 else 0.0
+        sortino = (mean / downside_std) * ann if downside_std > 0 else 0.0
+
+    # Max drawdown from running peak
+    running_max = eq.cummax()
+    drawdown = (eq - running_max) / running_max
+    max_dd_pct = abs(float(drawdown.min()) * 100.0) if len(drawdown) else 0.0
+    return sharpe, sortino, max_dd_pct
+
+
 def compute_metrics(result: "BacktestResult") -> BacktestMetrics:
     """Derive a BacktestMetrics from a BacktestResult.
 
     Pure function — does not mutate `result`.
     """
     trades = result.trades
-    stats = result.analyzer_stats
 
     # Total return from equity curve (authoritative)
     start_eq = float(result.equity_curve.iloc[0])
     end_eq = float(result.equity_curve.iloc[-1])
     total_return_pct = (end_eq - start_eq) / start_eq * 100.0 if start_eq else 0.0
 
-    sharpe = _pick(stats, _ANALYZER_KEY_ALIASES["sharpe_ratio"]) or 0.0
-    sortino = _pick(stats, _ANALYZER_KEY_ALIASES["sortino_ratio"]) or 0.0
-    mdd_raw = _pick(stats, _ANALYZER_KEY_ALIASES["max_drawdown"])
-    # Nautilus reports max_drawdown as a negative fraction (-0.12 = -12%).
-    # We surface absolute percent for display (12.0).
-    mdd_pct = abs(float(mdd_raw) * 100.0) if mdd_raw is not None else 0.0
+    # Sharpe / Sortino / Max DD computed from equity curve. Nautilus's
+    # returns analyzer often produces all-nan for event-driven backtests, so
+    # we use the equity series directly — it's the source of truth anyway.
+    sharpe, sortino, mdd_pct = _sharpe_sortino_mdd_from_equity(result.equity_curve)
     calmar = (total_return_pct / mdd_pct) if mdd_pct > 0 else 0.0
 
     total_trades = int(len(trades))
@@ -141,8 +180,13 @@ def compute_metrics(result: "BacktestResult") -> BacktestMetrics:
         avg_hold_time = None
 
     total_fees = float(trades["fees"].sum())
-    gross_pnl = float(trades["gross_pnl"].sum())
-    fee_drag_pct = fee_drag(total_fees, gross_pnl) * 100.0
+    # Fee drag uses the equity curve as the authoritative realized+unrealized
+    # P&L source: trades.gross_pnl.sum() only covers closed positions and
+    # misses mark-to-market on positions still open at end of backtest.
+    # gross_pnl = net_pnl_from_equity + total_fees (what we'd have without fees).
+    net_pnl_from_eq = end_eq - start_eq
+    gross_pnl_from_eq = net_pnl_from_eq + total_fees
+    fee_drag_pct = fee_drag(total_fees, gross_pnl_from_eq) * 100.0
 
     avg_slippage_bps = float(trades["slippage_bps"].mean()) if total_trades else 0.0
 

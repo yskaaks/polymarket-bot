@@ -80,8 +80,14 @@ def test_win_rate_three_of_four_winners():
     assert m.profit_factor == pytest.approx((14.5 + 4.7 + 0.9) / 20.5)
 
 
-def test_fee_drag_uses_abs_pnl():
-    """Losers still show fee drag — abs(gross_pnl) in denominator."""
+def test_fee_drag_uses_equity_curve_gross_pnl():
+    """Losers still show fee drag.
+
+    fee_drag denominator is abs(gross_pnl_from_equity), where
+    gross_pnl_from_equity = (final_equity - starting_equity) + total_fees.
+    Using the equity curve as the P&L source captures unrealized P&L on
+    open positions (trades.gross_pnl alone misses these).
+    """
     from src.layer1_research.backtesting.reporting.metrics import compute_metrics
     trades = [
         {"instrument_id": "a", "direction": "LONG",
@@ -92,10 +98,11 @@ def test_fee_drag_uses_abs_pnl():
          "edge_at_entry": 0.0, "slippage_bps": 0.0,
          "signal_confidence": 0.50, "realized_edge": -0.10},
     ]
-    r = _make_result(trades_rows=trades)
+    # Equity 10000 -> 9985 reflects net_pnl = -15. With $5 fees on top,
+    # gross_pnl_from_equity = -15 + 5 = -10. fee_drag = 5 / |-10| = 0.5 → 50%.
+    r = _make_result(trades_rows=trades, account_totals=[10_000.0, 9_985.0])
     m = compute_metrics(r)
     assert m.total_fees == pytest.approx(5.0)
-    # fee_drag = fees / abs(gross_pnl) = 5 / 10 = 0.5 → stored as 50.0 (percent)
     assert m.fee_drag_pct == pytest.approx(50.0)
 
 
@@ -133,18 +140,69 @@ def test_per_market_breakdown():
     assert m.per_market["mkt_b"].win_rate == pytest.approx(0.0)
 
 
-def test_sharpe_comes_from_analyzer_stats():
+def test_sharpe_sortino_drawdown_from_equity_curve():
+    """Sharpe / Sortino / Max DD are computed from the equity curve directly,
+    not from Nautilus analyzer_stats (which often returns all-nan for sparse
+    event-driven equity series)."""
     from src.layer1_research.backtesting.reporting.metrics import compute_metrics
-    r = _make_result(
-        trades_rows=[],
-        analyzer_stats={
-            "Sharpe Ratio (252 days)": 1.85,
-            "Sortino Ratio (252 days)": 2.20,
-            "Max Drawdown": -0.12,
-        },
+    from src.layer1_research.backtesting.results import BacktestResult
+    from src.layer1_research.backtesting.config import BacktestConfig
+
+    config = BacktestConfig(
+        catalog_path="data/catalog",
+        start=datetime(2024, 6, 1, tzinfo=timezone.utc),
+        end=datetime(2024, 6, 30, tzinfo=timezone.utc),
+        strategy_name="test", starting_capital=10_000.0, data_mode="trade",
+    )
+    # Equity timeline with multiple ups and downs so Sortino has >1 down sample.
+    # 10000 -> 11000 -> 9500 -> 10500 -> 9000 -> 12000
+    account = pd.DataFrame(
+        {"total": [
+            "10000.00 USD", "11000.00 USD", "9500.00 USD",
+            "10500.00 USD", "9000.00 USD", "12000.00 USD",
+        ]},
+        index=pd.to_datetime([
+            "2024-06-01T00Z", "2024-06-02T00Z", "2024-06-03T00Z",
+            "2024-06-04T00Z", "2024-06-05T00Z", "2024-06-06T00Z",
+        ], utc=True),
+    )
+    r = BacktestResult(
+        config=config, fills=pd.DataFrame(), positions=pd.DataFrame(),
+        account=account, instruments=[], analyzer_stats={"ignored": "ignored"},
+        signals=pd.DataFrame(), trades=pd.DataFrame(),
     )
     m = compute_metrics(r)
-    assert m.sharpe_ratio == pytest.approx(1.85)
-    assert m.sortino_ratio == pytest.approx(2.20)
-    # max drawdown reported as positive percent
-    assert m.max_drawdown_pct == pytest.approx(12.0)
+    assert m.total_return_pct == pytest.approx(20.0)         # 10k -> 12k
+    # Largest peak-to-trough: 11000 -> 9000 = -18.18%
+    assert m.max_drawdown_pct == pytest.approx(18.1818, abs=1e-2)
+    assert m.sharpe_ratio != 0.0   # nonzero, derived from returns
+    assert m.sortino_ratio != 0.0  # has >1 downside samples
+    assert m.calmar_ratio == pytest.approx(20.0 / 18.1818, abs=1e-2)
+
+
+def test_metrics_ignores_analyzer_stats_for_sharpe():
+    """Even if analyzer_stats has bogus Sharpe, we use the equity curve."""
+    from src.layer1_research.backtesting.reporting.metrics import compute_metrics
+    from src.layer1_research.backtesting.results import BacktestResult
+    from src.layer1_research.backtesting.config import BacktestConfig
+
+    config = BacktestConfig(
+        catalog_path="data/catalog",
+        start=datetime(2024, 6, 1, tzinfo=timezone.utc),
+        end=datetime(2024, 6, 30, tzinfo=timezone.utc),
+        strategy_name="test", starting_capital=10_000.0, data_mode="trade",
+    )
+    # Flat equity = zero returns = Sharpe should be 0
+    account = pd.DataFrame(
+        {"total": ["10000.00 USD", "10000.00 USD", "10000.00 USD"]},
+        index=pd.to_datetime(
+            ["2024-06-01T00Z", "2024-06-15T00Z", "2024-06-30T00Z"], utc=True,
+        ),
+    )
+    r = BacktestResult(
+        config=config, fills=pd.DataFrame(), positions=pd.DataFrame(),
+        account=account, instruments=[], analyzer_stats={"Sharpe Ratio": 99.0},
+        signals=pd.DataFrame(), trades=pd.DataFrame(),
+    )
+    m = compute_metrics(r)
+    assert m.sharpe_ratio == 0.0   # not 99.0 — equity is flat
