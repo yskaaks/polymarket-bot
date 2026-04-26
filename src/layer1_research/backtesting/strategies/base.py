@@ -104,7 +104,7 @@ class PredictionMarketStrategy(Strategy):
             size = signal.size
         else:
             account = self.portfolio.account(instrument.id.venue)
-            balance = account.balance_total(instrument.currency)
+            balance = account.balance_total(instrument.quote_currency)
             capital = float(balance)
             if self.config.sizer_mode == "kelly":
                 size = kelly_size(
