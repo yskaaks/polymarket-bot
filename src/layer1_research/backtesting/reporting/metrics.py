@@ -44,7 +44,7 @@ class PerMarketStats:
 
 @dataclass
 class BacktestMetrics:
-    # Scalar perf (from analyzer_stats or equity curve)
+    # Scalar perf (computed from the equity curve)
     total_return_pct: float
     sharpe_ratio: float
     sortino_ratio: float

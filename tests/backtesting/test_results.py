@@ -147,7 +147,6 @@ def test_backtest_result_construction_minimal():
         positions=pd.DataFrame(),
         account=account,
         instruments=[],
-        analyzer_stats={},
         signals=pd.DataFrame(),
         trades=pd.DataFrame(),
     )
@@ -175,7 +174,7 @@ def test_backtest_result_equity_curve_empty_account_raises():
             config=config,
             fills=pd.DataFrame(), positions=pd.DataFrame(),
             account=pd.DataFrame(),
-            instruments=[], analyzer_stats={},
+            instruments=[],
             signals=pd.DataFrame(), trades=pd.DataFrame(),
         )
 
@@ -204,7 +203,7 @@ def test_plot_methods_return_figures():
     )
     r = BacktestResult(
         config=config, fills=pd.DataFrame(), positions=pd.DataFrame(),
-        account=account, instruments=[], analyzer_stats={},
+        account=account, instruments=[],
         signals=pd.DataFrame(), trades=pd.DataFrame(),
     )
     assert r.plot_equity_curve() is not None
@@ -233,7 +232,7 @@ def test_to_mlflow_roundtrip(tmp_path, monkeypatch):
     )
     result = BacktestResult(
         config=config, fills=pd.DataFrame(), positions=pd.DataFrame(),
-        account=account, instruments=[], analyzer_stats={"Sharpe Ratio": 1.5},
+        account=account, instruments=[],
         signals=pd.DataFrame(), trades=pd.DataFrame(),
     )
 

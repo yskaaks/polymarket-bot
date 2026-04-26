@@ -124,7 +124,6 @@ class BacktestRunner:
         positions = engine.trader.generate_positions_report()
         account = engine.trader.generate_account_report(POLYMARKET_VENUE)
 
-        analyzer_stats = self._collect_analyzer_stats(engine)
         signals_df = self._signal_log_to_df(strategy._signal_log)
         trades_df = self._fills_to_trades(fills, signals_df)
 
@@ -132,7 +131,6 @@ class BacktestRunner:
             config=self._config,
             fills=fills, positions=positions, account=account,
             instruments=instruments,
-            analyzer_stats=analyzer_stats,
             signals=signals_df,
             trades=trades_df,
         )
@@ -185,26 +183,6 @@ class BacktestRunner:
         )
         kwargs.update(self._config.strategy_params)
         return strategy_class(config=config_cls(**kwargs))
-
-    def _collect_analyzer_stats(self, engine: BacktestEngine) -> dict:
-        """Pull scalar perf stats from Nautilus's backtest result object.
-
-        We grab the full dict; reporting.metrics decides which keys to surface.
-        engine.get_result() exposes stats_pnls and stats_returns as dicts.
-        """
-        try:
-            engine_result = engine.get_result()
-        except Exception as e:
-            raise RuntimeError(
-                f"failed to get engine result for analyzer stats: {e}"
-            ) from e
-
-        stats = {}
-        pnls = engine_result.stats_pnls or {}
-        stats.update(pnls)
-        returns = engine_result.stats_returns or {}
-        stats.update(returns)
-        return stats
 
     def _signal_log_to_df(self, log: list) -> pd.DataFrame:
         if not log:

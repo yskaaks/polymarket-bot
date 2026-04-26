@@ -130,7 +130,6 @@ class BacktestResult:
     positions: pd.DataFrame
     account: pd.DataFrame
     instruments: list               # list[BinaryOption]
-    analyzer_stats: dict            # from nautilus trader.analyzer
     signals: pd.DataFrame           # one row per SignalSnapshot
     trades: pd.DataFrame            # one row per Trade
 
@@ -308,7 +307,6 @@ class BacktestResult:
                 positions=_load("positions.parquet"),
                 account=_load("account.parquet"),
                 instruments=[],  # not restorable from artifacts
-                analyzer_stats={},  # scalar metrics re-derived from equity curve
                 signals=_load("signals.parquet"),
                 trades=_load("trades.parquet"),
             )

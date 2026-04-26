@@ -4,8 +4,7 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta
 
 
-def _make_result(*, trades_rows, signals_rows=None, account_totals=None,
-                 analyzer_stats=None):
+def _make_result(*, trades_rows, signals_rows=None, account_totals=None):
     from src.layer1_research.backtesting.results import BacktestResult
     from src.layer1_research.backtesting.config import BacktestConfig
 
@@ -33,7 +32,6 @@ def _make_result(*, trades_rows, signals_rows=None, account_totals=None,
     return BacktestResult(
         config=config, fills=pd.DataFrame(), positions=pd.DataFrame(),
         account=account, instruments=[],
-        analyzer_stats=analyzer_stats or {},
         signals=signals, trades=trades,
     )
 
@@ -141,9 +139,7 @@ def test_per_market_breakdown():
 
 
 def test_sharpe_sortino_drawdown_from_equity_curve():
-    """Sharpe / Sortino / Max DD are computed from the equity curve directly,
-    not from Nautilus analyzer_stats (which often returns all-nan for sparse
-    event-driven equity series)."""
+    """Sharpe / Sortino / Max DD are computed from the equity curve directly."""
     from src.layer1_research.backtesting.reporting.metrics import compute_metrics
     from src.layer1_research.backtesting.results import BacktestResult
     from src.layer1_research.backtesting.config import BacktestConfig
@@ -168,7 +164,7 @@ def test_sharpe_sortino_drawdown_from_equity_curve():
     )
     r = BacktestResult(
         config=config, fills=pd.DataFrame(), positions=pd.DataFrame(),
-        account=account, instruments=[], analyzer_stats={"ignored": "ignored"},
+        account=account, instruments=[],
         signals=pd.DataFrame(), trades=pd.DataFrame(),
     )
     m = compute_metrics(r)
@@ -180,8 +176,8 @@ def test_sharpe_sortino_drawdown_from_equity_curve():
     assert m.calmar_ratio == pytest.approx(20.0 / 18.1818, abs=1e-2)
 
 
-def test_metrics_ignores_analyzer_stats_for_sharpe():
-    """Even if analyzer_stats has bogus Sharpe, we use the equity curve."""
+def test_flat_equity_yields_zero_sharpe():
+    """Flat equity curve = zero returns = Sharpe must be 0 (no division by 0)."""
     from src.layer1_research.backtesting.reporting.metrics import compute_metrics
     from src.layer1_research.backtesting.results import BacktestResult
     from src.layer1_research.backtesting.config import BacktestConfig
@@ -192,7 +188,6 @@ def test_metrics_ignores_analyzer_stats_for_sharpe():
         end=datetime(2024, 6, 30, tzinfo=timezone.utc),
         strategy_name="test", starting_capital=10_000.0, data_mode="trade",
     )
-    # Flat equity = zero returns = Sharpe should be 0
     account = pd.DataFrame(
         {"total": ["10000.00 USD", "10000.00 USD", "10000.00 USD"]},
         index=pd.to_datetime(
@@ -201,8 +196,10 @@ def test_metrics_ignores_analyzer_stats_for_sharpe():
     )
     r = BacktestResult(
         config=config, fills=pd.DataFrame(), positions=pd.DataFrame(),
-        account=account, instruments=[], analyzer_stats={"Sharpe Ratio": 99.0},
+        account=account, instruments=[],
         signals=pd.DataFrame(), trades=pd.DataFrame(),
     )
     m = compute_metrics(r)
-    assert m.sharpe_ratio == 0.0   # not 99.0 — equity is flat
+    assert m.sharpe_ratio == 0.0
+    assert m.sortino_ratio == 0.0
+    assert m.max_drawdown_pct == 0.0
