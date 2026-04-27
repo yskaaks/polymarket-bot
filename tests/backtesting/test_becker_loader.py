@@ -56,3 +56,45 @@ def test_invalid_data_dir():
     from src.layer1_research.backtesting.data.loaders.becker_parquet import BeckerParquetLoader
     with pytest.raises(FileNotFoundError):
         BeckerParquetLoader("/nonexistent/path")
+
+
+def test_becker_loader_raises_on_out_of_range_price(tmp_path):
+    """Out-of-range raw prices must raise, not be silently clamped."""
+    import os
+    import duckdb
+
+    d = str(tmp_path)
+    os.makedirs(f"{d}/polymarket/markets", exist_ok=True)
+    os.makedirs(f"{d}/polymarket/trades", exist_ok=True)
+    os.makedirs(f"{d}/polymarket/blocks", exist_ok=True)
+
+    con = duckdb.connect()
+    con.execute(f"""
+        COPY (
+            SELECT 'cond_bad' as condition_id, 'q' as question, '["Yes","No"]' as outcomes,
+                   '["tok_bad","tok_bad_no"]' as clob_token_ids, 1000.0 as volume,
+                   1 as active, 0 as closed, '2024-12-31T00:00:00Z' as end_date,
+                   '2024-01-01T00:00:00Z' as created_at
+        ) TO '{d}/polymarket/markets/markets.parquet' (FORMAT PARQUET)
+    """)
+    # Create a trade that produces price > 1.0: maker=2_000_000, taker=1_000_000
+    # maker_asset_id='0' means side='BUY', price = maker_amount/taker_amount = 2.0
+    con.execute(f"""
+        COPY (
+            SELECT 50000000 as block_number, 'tx' as transaction_hash, 0 as log_index,
+                   'ord' as order_hash, '0xm' as maker, '0xt' as taker,
+                   '0' as maker_asset_id, 'tok_bad' as taker_asset_id,
+                   2000000 as maker_amount, 1000000 as taker_amount, 0 as fee
+        ) TO '{d}/polymarket/trades/trades.parquet' (FORMAT PARQUET)
+    """)
+    con.execute(f"""
+        COPY (
+            SELECT 50000000 as block_number, 1718448000 as timestamp
+        ) TO '{d}/polymarket/blocks/blocks.parquet' (FORMAT PARQUET)
+    """)
+    con.close()
+
+    from src.layer1_research.backtesting.data.loaders.becker_parquet import BeckerParquetLoader
+    loader = BeckerParquetLoader(d)
+    with pytest.raises(ValueError, match="price must be between"):
+        list(loader.get_trades("tok_bad"))

@@ -20,13 +20,14 @@ def catalog_dir():
     shutil.rmtree(d)
 
 
-def test_e2e_backtest_produces_results(becker_data_dir, catalog_dir):
+def test_e2e_backtest_returns_result(becker_data_dir, catalog_dir):
     from src.layer1_research.backtesting.data.catalog import build_catalog
     from src.layer1_research.backtesting.data.loaders.becker_parquet import BeckerParquetLoader
     from src.layer1_research.backtesting.config import BacktestConfig
     from src.layer1_research.backtesting.runner import BacktestRunner
+    from src.layer1_research.backtesting.results import BacktestResult
     from src.layer1_research.backtesting.strategies.base import (
-        PredictionMarketStrategy, PredictionMarketStrategyConfig,
+        PredictionMarketStrategy,
     )
     from src.layer1_research.backtesting.strategies.signal import Signal
 
@@ -35,9 +36,10 @@ def test_e2e_backtest_produces_results(becker_data_dir, catalog_dir):
 
     class BuyLowStrategy(PredictionMarketStrategy):
         def generate_signal(self, instrument, data):
-            price = float(data.price) if hasattr(data, 'price') else float(data.close)
+            price = float(data.price) if hasattr(data, "price") else float(data.close)
             if price < 0.40:
-                return Signal(direction="BUY", confidence=0.65, target_price=price, size=10.0)
+                return Signal(direction="BUY", confidence=0.65,
+                              target_price=price, size=10.0)
             return None
 
     config = BacktestConfig(
@@ -48,10 +50,15 @@ def test_e2e_backtest_produces_results(becker_data_dir, catalog_dir):
         starting_capital=10_000.0,
         data_mode="trade",
     )
-
     runner = BacktestRunner(config)
-    summary = runner.run(BuyLowStrategy)
+    result = runner.run(BuyLowStrategy)
 
-    assert summary is not None
-    assert summary.strategy_name == "buy_low"
-    assert summary.starting_capital == 10_000.0
+    assert isinstance(result, BacktestResult)
+    assert result.config.strategy_name == "buy_low"
+    assert result.config.starting_capital == 10_000.0
+    # account report non-empty + equity curve populated
+    assert not result.account.empty
+    assert len(result.equity_curve) > 0
+    # signals captured (even if 0 — should be a DataFrame, not None)
+    assert result.signals is not None
+    assert result.trades is not None
